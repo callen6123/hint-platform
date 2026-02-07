@@ -1,0 +1,256 @@
+import json
+import shutil
+import subprocess
+import time
+import requests
+from flask import Flask, request
+
+PROVISION_PATH = "/etc/hint/provision.json"
+DEVICE_ID_PATH = "/etc/hint/device_id"
+
+# Hub pairing endpoint (mDNS)
+HUB_PAIR_URL = "http://hinthub.local:5000/pair/complete"
+
+app = Flask(__name__)
+
+HTML = """
+<!doctype html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hint Device Setup</title>
+  </head>
+  <body style="font-family: sans-serif; max-width: 520px; margin: 40px auto;">
+    <h2>Hint Device Setup</h2>
+    <p>Connect your phone/laptop to Wi-Fi <b>HintDevice-SETUP</b> (password <b>hintsetup123</b>). Your phone may open the setup page automatically; if not, open your browser and visit the gateway IP (often <b>10.42.0.1</b>).</p>
+    <form method="post" action="/submit">
+      <label>Venue Wi-Fi SSID</label><br>
+      <input name="ssid" style="width:100%;padding:10px" required><br><br>
+      <label>Venue Wi-Fi Password</label><br>
+      <input name="psk" type="password" style="width:100%;padding:10px" required><br><br>
+      <label>Pairing Code</label><br>
+      <input name="pair_code" style="width:100%;padding:10px" required><br><br>
+      <button type="submit" style="padding:12px 18px">Connect & Pair</button>
+    </form>
+  </body>
+</html>
+"""
+
+def sh(cmd: list[str]) -> None:
+    subprocess.check_call(cmd)
+
+def enable_agent_service() -> None:
+    try:
+        sh(["sudo", "systemctl", "daemon-reload"])
+        sh(["sudo", "systemctl", "enable", "hint-agent.service"])
+        sh(["sudo", "systemctl", "start", "hint-agent.service"])
+    except Exception as e:
+        raise RuntimeError(f"Failed to enable agent service: {e}")
+
+HOTSPOT_CONN_NAME = "hint-setup"
+HOTSPOT_SSID = "HintDevice-SETUP"
+HOTSPOT_PSK = "hintsetup123"
+
+
+def nmcli(*args: str) -> str:
+    # Returns stdout as text.
+    out = subprocess.check_output(["nmcli", "-t", *args], text=True)
+    return out.strip()
+
+
+def ensure_networkmanager() -> None:
+    if shutil.which("nmcli") is None:
+        raise RuntimeError("nmcli not found. Install and enable NetworkManager.")
+
+
+def ensure_hotspot_up() -> None:
+    """Ensure the provisioning hotspot is active via NetworkManager."""
+    ensure_networkmanager()
+
+    # Create the hotspot connection if it doesn't exist.
+    # Using `nmcli dev wifi hotspot` keeps the setup simple and works on Pi OS.
+    existing = nmcli("-f", "NAME", "connection", "show")
+    names = set([line for line in existing.splitlines() if line])
+    if HOTSPOT_CONN_NAME not in names:
+        sh([
+            "sudo",
+            "nmcli",
+            "dev",
+            "wifi",
+            "hotspot",
+            "ifname",
+            "wlan0",
+            "con-name",
+            HOTSPOT_CONN_NAME,
+            "ssid",
+            HOTSPOT_SSID,
+            "password",
+            HOTSPOT_PSK,
+        ])
+    else:
+        # Bring it up (idempotent)
+        sh(["sudo", "nmcli", "con", "up", HOTSPOT_CONN_NAME])
+
+    # Give NM a moment to finish assigning the hotspot IP
+    time.sleep(2)
+
+
+# --- Helper functions for explicit Wi-Fi profile connection ---
+def safe_conn_name(ssid: str) -> str:
+    # Create a deterministic, NM-safe connection name from SSID
+    base = "venue-" + "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in ssid)
+    return base[:28]
+
+
+def connect_with_profile(ssid: str, psk: str) -> None:
+    """Create/replace a Wi-Fi profile with explicit key-mgmt/psk and bring it up."""
+    conn = safe_conn_name(ssid)
+
+    # Remove any old profile with this name (ignore errors)
+    try:
+        sh(["sudo", "nmcli", "con", "delete", conn])
+    except Exception:
+        pass
+
+    # Add a Wi-Fi connection profile
+    sh(["sudo", "nmcli", "con", "add", "type", "wifi", "ifname", "wlan0", "con-name", conn, "ssid", ssid])
+
+    # Explicit security settings (prevents 'key-mgmt missing' errors)
+    sh(["sudo", "nmcli", "con", "modify", conn, "wifi-sec.key-mgmt", "wpa-psk"])
+    sh(["sudo", "nmcli", "con", "modify", conn, "wifi-sec.psk", psk])
+
+    # Bring the connection up
+    sh(["sudo", "nmcli", "con", "up", conn])
+
+
+def join_venue_wifi(ssid: str, psk: str) -> None:
+    """Switch from hotspot to client Wi-Fi and wait for an IP address."""
+    ensure_networkmanager()
+
+    # Stop hotspot if it's active
+    try:
+        sh(["sudo", "nmcli", "con", "down", HOTSPOT_CONN_NAME])
+    except Exception:
+        pass
+
+    # After AP mode, force a rescan so NM sees nearby networks.
+    try:
+        sh(["sudo", "nmcli", "dev", "wifi", "rescan", "ifname", "wlan0"])
+    except Exception:
+        pass
+
+    # Give scan results time to populate and confirm the SSID is visible.
+    visible = False
+    deadline_scan = time.time() + 10
+    while time.time() < deadline_scan:
+        try:
+            # `-t` output is colon-separated; SSID is the first field with `-f SSID`.
+            ssids = nmcli("-f", "SSID", "dev", "wifi", "list", "ifname", "wlan0")
+            if any(line.strip() == ssid for line in ssids.splitlines()):
+                visible = True
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    if not visible:
+        # Bring hotspot back so the user can reconnect and try again.
+        try:
+            sh(["sudo", "nmcli", "con", "up", HOTSPOT_CONN_NAME])
+        except Exception:
+            pass
+        raise RuntimeError(f"SSID '{ssid}' not visible. If this is a hidden network, this UI does not support it yet.")
+
+    # Connect using an explicit profile so key-mgmt/psk are always set.
+    last_err: Exception | None = None
+    for _ in range(2):
+        try:
+            connect_with_profile(ssid, psk)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            time.sleep(2)
+
+    if last_err is not None:
+        # Bring hotspot back so the user can reconnect and try again.
+        try:
+            sh(["sudo", "nmcli", "con", "up", HOTSPOT_CONN_NAME])
+        except Exception:
+            pass
+        raise RuntimeError(f"nmcli connect failed: {last_err}")
+
+    # Wait for an IPv4 address and an activated state.
+    deadline = time.time() + 30
+    last_state = ""
+    while time.time() < deadline:
+        try:
+            state = nmcli("-f", "GENERAL.STATE", "device", "show", "wlan0")
+            ip4 = nmcli("-f", "IP4.ADDRESS", "device", "show", "wlan0")
+            last_state = f"{state} {ip4}".strip()
+            # GENERAL.STATE will look like: GENERAL.STATE:100 (connected)
+            if "100" in state and "IP4.ADDRESS" in ip4 and ":" in ip4 and ip4.split(":", 1)[1].strip():
+                return
+        except Exception:
+            pass
+        time.sleep(1)
+
+    raise RuntimeError(f"Timed out waiting for Wi-Fi connection/IP. Last: {last_state}")
+
+def read_device_id() -> str:
+    with open(DEVICE_ID_PATH, "r") as f:
+        return f.read().strip()
+
+@app.get("/")
+def index():
+    return HTML
+
+@app.post("/submit")
+def submit():
+    ssid = request.form.get("ssid", "").strip()
+    psk = request.form.get("psk", "").strip()
+    pair_code = request.form.get("pair_code", "").strip()
+
+    if not ssid or not psk or not pair_code:
+        return "Missing fields", 400
+
+    device_id = read_device_id()
+
+    try:
+        join_venue_wifi(ssid, psk)
+    except Exception as e:
+        return f"Failed to join venue Wi-Fi: {e}", 500
+
+    # Pair with hub
+    try:
+        r = requests.post(HUB_PAIR_URL, json={"pair_code": pair_code, "device_id": device_id}, timeout=10)
+        if r.status_code != 200:
+            return f"Pairing failed ({r.status_code}): {r.text}", 500
+        data = r.json()
+        if not data.get("ok"):
+            return f"Pairing failed: {data}", 500
+    except Exception as e:
+        return f"Could not reach hub for pairing: {e}", 500
+
+    # Save provisioning (atomic)
+    tmp = "/tmp/provision.json"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    sh(["sudo", "cp", tmp, PROVISION_PATH])
+    sh(["sudo", "chmod", "600", PROVISION_PATH])
+
+    # Enable and start agent service
+    enable_agent_service()
+
+    # Reboot into agent mode
+    sh(["sudo", "reboot"])
+    return "Paired. Rebooting..."
+
+def main():
+    # Ensure AP is up before serving the page
+    ensure_hotspot_up()
+    # Run Flask (this must NOT exit)
+    app.run(host="0.0.0.0", port=80)
+
+# Run unconditionally so it can't “exit cleanly” due to __name__ oddities
+main()
