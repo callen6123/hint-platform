@@ -18,7 +18,7 @@ def load_provision() -> dict:
 def play() -> None:
     if not AUDIO_PATH.exists():
         return
-    subprocess.call(["aplay", "-D", "plughw:2,0", str(AUDIO_PATH)])
+    subprocess.call(["aplay", str(AUDIO_PATH)])
 
 
 def main() -> None:
