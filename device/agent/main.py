@@ -2,12 +2,24 @@ import json
 import time
 import subprocess
 import socket
+import hashlib
+import shutil
+import tempfile
+import urllib.request
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
 PROVISION_PATH = Path("/etc/hint/provision.json")
+
 AUDIO_PATH = Path("/opt/hint/audio/demo.wav")
+
+# OTA paths
+OTA_STAGING = Path("/opt/hint/agent_staging")
+OTA_RELEASES = Path("/opt/hint/agent_releases")
+AGENT_CURRENT = Path("/opt/hint/agent_current")
+SETUP_RELEASES = Path("/opt/hint/device_setup_releases")
+SETUP_CURRENT = Path("/opt/hint/device_setup_current")
 
 
 def load_provision() -> dict:
@@ -19,6 +31,93 @@ def play() -> None:
     if not AUDIO_PATH.exists():
         return
     subprocess.call(["aplay", str(AUDIO_PATH)])
+
+
+def sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def run(cmd: list[str]) -> None:
+    subprocess.check_call(cmd)
+
+
+def do_ota_update(prov: dict) -> None:
+    ota = prov.get("ota")
+    if not isinstance(ota, dict):
+        raise RuntimeError("No OTA info in provision.json")
+
+    base = ota.get("base_url")
+    device_id = ota.get("device_id")
+    token = ota.get("token")
+
+    if not base or not device_id or not token:
+        raise RuntimeError("Incomplete OTA credentials")
+
+    params = f"device_id={device_id}&token={token}"
+    latest_url = f"{base}/ota/latest?{params}"
+
+    # Fetch manifest
+    with urllib.request.urlopen(latest_url, timeout=30) as r:
+        latest = json.loads(r.read().decode("utf-8"))
+
+    ver = latest["version"]
+    fname = latest["filename"]
+    want_sha = latest["sha256"]
+
+    file_url = f"{base}/ota/file/{fname}?{params}"
+
+    OTA_STAGING.mkdir(parents=True, exist_ok=True)
+    OTA_RELEASES.mkdir(parents=True, exist_ok=True)
+    SETUP_RELEASES.mkdir(parents=True, exist_ok=True)
+
+    tmp = OTA_STAGING / fname
+
+    # Download bundle
+    with urllib.request.urlopen(file_url, timeout=60) as r, tmp.open("wb") as f:
+        shutil.copyfileobj(r, f)
+
+    # Verify checksum
+    got = sha256_file(tmp)
+    if got != want_sha:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Checksum mismatch: {got} != {want_sha}")
+
+    # Extract
+    work = Path(tempfile.mkdtemp(prefix="hint-ota-", dir=str(OTA_STAGING)))
+    run(["tar", "-xzf", str(tmp), "-C", str(work)])
+
+    dev = work / "device"
+    agent_src = dev / "agent"
+    setup_src = dev / "device_setup"
+
+    if not agent_src.exists() or not setup_src.exists():
+        raise RuntimeError("Invalid OTA bundle layout")
+
+    agent_dst = OTA_RELEASES / ver
+    setup_dst = SETUP_RELEASES / ver
+
+    if agent_dst.exists():
+        shutil.rmtree(agent_dst)
+    if setup_dst.exists():
+        shutil.rmtree(setup_dst)
+
+    shutil.copytree(agent_src, agent_dst)
+    shutil.copytree(setup_src, setup_dst)
+
+    # Atomically switch
+    AGENT_CURRENT.unlink(missing_ok=True)
+    AGENT_CURRENT.symlink_to(agent_dst)
+
+    SETUP_CURRENT.unlink(missing_ok=True)
+    SETUP_CURRENT.symlink_to(setup_dst)
+
+    # Restart services
+    run(["systemctl", "restart", "hint-agent"])
+    run(["systemctl", "restart", "hint-setup"])
 
 
 def main() -> None:
@@ -71,7 +170,6 @@ def main() -> None:
         try:
             d = json.loads(raw)
         except Exception:
-            # If the message isn't JSON, ignore but don't crash
             return
 
         cid = d.get("command_id")
@@ -79,8 +177,17 @@ def main() -> None:
             return
 
         publish_ack(str(cid), "accepted")
-        play()
-        publish_ack(str(cid), "completed")
+
+        try:
+            if d.get("cmd") == "update":
+                do_ota_update(prov)
+            else:
+                play()
+
+            publish_ack(str(cid), "completed")
+
+        except Exception as e:
+            publish_ack(str(cid), f"error:{e}")
 
     c.on_connect = on_connect
     c.on_message = on_message

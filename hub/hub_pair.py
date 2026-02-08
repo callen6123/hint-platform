@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file, abort
 import os
 import subprocess
 import secrets
@@ -13,6 +13,7 @@ PAIR_CODE = "483921"  # you will type this into the device setup page
 
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
+OTA_DIR = Path("/opt/hint/ota")
 
 def sanitize_topic_id(s: str) -> str:
     # Keep MQTT topic segments simple and safe
@@ -127,7 +128,7 @@ def write_registry(reg: dict) -> None:
     subprocess.run(["sudo", "chmod", "664", str(REGISTRY_PATH)], check=True)
 
 
-def upsert_device(device_id: str, site_id: str, mqtt_user: str) -> None:
+def upsert_device(device_id: str, site_id: str, mqtt_user: str, ota_token: str) -> None:
     reg = read_registry()
     rec = reg.get(device_id) if isinstance(reg, dict) else None
     if not isinstance(rec, dict):
@@ -138,6 +139,7 @@ def upsert_device(device_id: str, site_id: str, mqtt_user: str) -> None:
             "device_id": device_id,
             "site_id": site_id,
             "mqtt_user": mqtt_user,
+            "ota_token": ota_token,
             "paired_at": utc_now_iso(),
             "last_seen": rec.get("last_seen"),
             "status": rec.get("status", "paired"),
@@ -160,12 +162,15 @@ def pair_complete():
     mqtt_user = f"dev_{device_id}"
     mqtt_pass = gen_password()
 
+    ota_token = secrets.token_urlsafe(24)
+
     # Ensure broker has user + ACL
     ensure_mqtt_user(mqtt_user, mqtt_pass)
     ensure_acl(device_id, mqtt_user)
     restart_mosquitto()
 
-    upsert_device(device_id=device_id, site_id="demo", mqtt_user=mqtt_user)
+
+    upsert_device(device_id=device_id, site_id="demo", mqtt_user=mqtt_user, ota_token=ota_token)
 
     return jsonify({
         "ok": True,
@@ -181,8 +186,55 @@ def pair_complete():
             "cmd": f"{topic_base}/cmd",
             "ack": f"{topic_base}/ack",
             "state": f"{topic_base}/state"
+        },
+        "ota": {
+            "base_url": "http://hinthub.local:5000",
+            "device_id": device_id,
+            "token": ota_token
         }
     })
+
+
+# OTA authentication and endpoints
+def require_ota_auth() -> tuple[str, dict]:
+    device_id = sanitize_topic_id(request.args.get("device_id") or "")
+    token = request.args.get("token") or ""
+    if not device_id or not token:
+        abort(403)
+
+    reg = read_registry()
+    rec = reg.get(device_id) if isinstance(reg, dict) else None
+    if not isinstance(rec, dict):
+        abort(403)
+
+    if rec.get("ota_token") != token:
+        abort(403)
+
+    return device_id, rec
+
+
+@app.get("/ota/latest")
+def ota_latest():
+    require_ota_auth()
+    p = OTA_DIR / "latest.json"
+    if not p.exists():
+        abort(404)
+    return send_file(str(p), mimetype="application/json")
+
+
+@app.get("/ota/file/<path:filename>")
+def ota_file(filename: str):
+    require_ota_auth()
+
+    # Only serve files inside OTA_DIR
+    ota_root = OTA_DIR.resolve()
+    p = (OTA_DIR / filename).resolve()
+    if not str(p).startswith(str(ota_root)):
+        abort(403)
+    if not p.exists():
+        abort(404)
+
+    return send_file(str(p), mimetype="application/gzip")
 
 if __name__ == "__main__":
     # 0.0.0.0 so the device can reach it on the LAN
