@@ -11,8 +11,22 @@ DEVICE_DIR = REPO / "device"
 OUT_DIR = Path("/opt/hint/ota")
 
 def sh(cmd: list[str]) -> str:
-    res = subprocess.run(cmd, cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
-    return res.stdout.strip()
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=str(REPO),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=True,
+        )
+        return res.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        out = (e.output or "").strip()
+        msg = f"Command failed: {cmd} (exit {e.returncode})"
+        if out:
+            msg += "\n--- output ---\n" + out
+        raise RuntimeError(msg) from e
 
 def sha256_file(p: Path) -> str:
     h = hashlib.sha256()
@@ -25,7 +39,7 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Pull latest code
-    sh(["git", "pull"])
+    sh(["git", "pull", "--ff-only"])
 
     ver = sh(["git", "rev-parse", "--short", "HEAD"])
     bundle = OUT_DIR / f"hint-device-{ver}.tar.gz"
