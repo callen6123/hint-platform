@@ -29,8 +29,24 @@ def load_provision() -> dict:
 
 def play() -> None:
     if not AUDIO_PATH.exists():
+        print(f"[AUDIO] missing file: {AUDIO_PATH}")
         return
-    subprocess.call(["aplay", str(AUDIO_PATH)])
+
+    cmd = ["aplay", str(AUDIO_PATH)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            err = (res.stderr or "").strip()
+            out = (res.stdout or "").strip()
+            print(f"[AUDIO] aplay failed rc={res.returncode} cmd={cmd}")
+            if out:
+                print(f"[AUDIO] stdout: {out}")
+            if err:
+                print(f"[AUDIO] stderr: {err}")
+        else:
+            print(f"[AUDIO] played {AUDIO_PATH}")
+    except Exception as e:
+        print(f"[AUDIO] exception running aplay: {e}")
 
 
 def sha256_file(p: Path) -> str:
