@@ -240,11 +240,28 @@ def ota_file(filename: str):
 
 # Dashboard-triggered fleet actions
 
+
 def require_dashboard_key() -> None:
     want = os.environ.get("HINT_DASH_API_KEY")
     got = request.headers.get("X-Api-Key")
     if not want or not got or got != want:
         abort(403)
+
+
+# UI auth (no secrets in browser). Protect /dashboard and /ui/* with HTTP Basic Auth.
+
+def require_ui_auth() -> None:
+    user = os.environ.get("HINT_UI_USER")
+    pw = os.environ.get("HINT_UI_PASS")
+    if not user or not pw:
+        abort(403)
+
+    auth = request.authorization
+    if not auth or auth.username != user or auth.password != pw:
+        resp = jsonify({"ok": False, "error": "auth_required"})
+        resp.status_code = 401
+        resp.headers["WWW-Authenticate"] = 'Basic realm="Hint Hub"'
+        return resp
 
 
 def mqtt_admin_cfg() -> tuple[str, int, str, str]:
@@ -396,9 +413,117 @@ def fleet_build_and_update():
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
 
+#
+# UI proxy endpoints (same-origin). No API key required from the browser.
+
+@app.get("/ui/status")
+def ui_status():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    devices = []
+    for _, rec in reg.items():
+        if isinstance(rec, dict):
+            devices.append(rec)
+
+    devices.sort(key=lambda r: str(r.get("device_id", "")))
+    return jsonify({"ok": True, "devices": devices})
+
+
+@app.post("/ui/update")
+def ui_update():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    targets, err = _fleet_targets(body, reg)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+
+    sent: list[str] = []
+    skipped: list[str] = []
+
+    for did in targets:
+        rec = reg.get(did)
+        if not isinstance(rec, dict):
+            skipped.append(did)
+            continue
+
+        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        try:
+            publish_update(site_id, did, command_id)
+            sent.append(did)
+        except Exception:
+            skipped.append(did)
+
+    return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
+
+
+@app.post("/ui/build-and-update")
+def ui_build_and_update():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+
+    if not BUILD_OTA_SCRIPT.exists():
+        return jsonify({"ok": False, "error": f"Missing build script: {BUILD_OTA_SCRIPT}"}), 500
+
+    try:
+        subprocess.check_call(["/usr/bin/python3", str(BUILD_OTA_SCRIPT)])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"OTA build failed: {e}"}), 500
+
+    # then publish updates
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    targets, err = _fleet_targets(body, reg)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+
+    sent: list[str] = []
+    skipped: list[str] = []
+
+    for did in targets:
+        rec = reg.get(did)
+        if not isinstance(rec, dict):
+            skipped.append(did)
+            continue
+
+        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        try:
+            publish_update(site_id, did, command_id)
+            sent.append(did)
+        except Exception:
+            skipped.append(did)
+
+    return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
+
+
 # Dashboard HTML shell route
 @app.get("/dashboard")
 def dashboard():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
     # Public HTML shell; API operations are still protected by X-Api-Key.
     html = """<!doctype html>
 <html lang=\"en\">
@@ -466,13 +591,10 @@ def dashboard():
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  const API_KEY = "__API_KEY__";
-
   async function api(path, method, body){
     const opts = {
       method,
       headers: {
-        'X-Api-Key': API_KEY,
         'Content-Type': 'application/json'
       }
     };
@@ -498,7 +620,7 @@ def dashboard():
 
   async function refresh(){
     try {
-      const data = await api('/fleet/status', 'GET');
+      const data = await api('/ui/status', 'GET');
       const devices = data.devices || [];
       render(devices);
     } catch (e) {
@@ -545,11 +667,11 @@ def dashboard():
           btn.disabled = true;
           if (action === 'update') {
             log(`Updating ${device}...`);
-            const r = await api('/fleet/update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
+            const r = await api('/ui/update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
             log(`Update result: ${JSON.stringify(r)}`);
           } else {
             log(`Build+Update ${device}...`);
-            const r = await api('/fleet/build-and-update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
+            const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
             log(`Build+Update result: ${JSON.stringify(r)}`);
           }
           await refresh();
@@ -569,7 +691,7 @@ def dashboard():
   $(\"updateAll\").addEventListener('click', async () => {
     try {
       log('Update All...');
-      const r = await api('/fleet/update', 'POST', { all: true, command_id: `ota-all-${Date.now()}` });
+      const r = await api('/ui/update', 'POST', { all: true, command_id: `ota-all-${Date.now()}` });
       log(`Update All result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
@@ -580,7 +702,7 @@ def dashboard():
   $(\"buildUpdateAll\").addEventListener('click', async () => {
     try {
       log('Build+Update All...');
-      const r = await api('/fleet/build-and-update', 'POST', { all: true, command_id: `ota-build-all-${Date.now()}` });
+      const r = await api('/ui/build-and-update', 'POST', { all: true, command_id: `ota-build-all-${Date.now()}` });
       log(`Build+Update All result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
@@ -595,8 +717,7 @@ def dashboard():
 </script>
 </body>
 </html>"""
-    api_key = os.environ.get("HINT_DASH_API_KEY", "")
-    return html.replace("__API_KEY__", api_key)
+    return html
 
 if __name__ == "__main__":
     # 0.0.0.0 so the device can reach it on the LAN
