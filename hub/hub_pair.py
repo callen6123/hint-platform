@@ -4,6 +4,7 @@ import subprocess
 import secrets
 import string
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -235,6 +236,91 @@ def ota_file(filename: str):
         abort(404)
 
     return send_file(str(p), mimetype="application/gzip")
+
+# Dashboard-triggered fleet actions
+
+def require_dashboard_key() -> None:
+    want = os.environ.get("HINT_DASH_API_KEY")
+    got = request.headers.get("X-Api-Key")
+    if not want or not got or got != want:
+        abort(403)
+
+
+def mqtt_admin_cfg() -> tuple[str, int, str, str]:
+    host = os.environ.get("HUB_MQTT_HOST", "localhost")
+    port = int(os.environ.get("HUB_MQTT_PORT", "1883"))
+    user = os.environ.get("HUB_MQTT_USER", "hubadmin")
+    pw = os.environ.get("HUB_MQTT_PASS", "devpass123")
+    return host, port, user, pw
+
+
+def publish_update(site_id: str, device_id: str, command_id: str) -> None:
+    host, port, user, pw = mqtt_admin_cfg()
+    topic = f"site/{site_id}/device/{device_id}/cmd"
+    payload = json.dumps({"command_id": command_id, "cmd": "update"})
+    subprocess.check_call(
+        [
+            "mosquitto_pub",
+            "-h",
+            host,
+            "-p",
+            str(port),
+            "-u",
+            user,
+            "-P",
+            pw,
+            "-t",
+            topic,
+            "-m",
+            payload,
+        ]
+    )
+
+
+@app.post("/fleet/update")
+def fleet_update():
+    require_dashboard_key()
+
+    body = request.get_json(silent=True) or {}
+
+    # Targeting
+    single = body.get("device_id")
+    many = body.get("device_ids")
+    all_devices = bool(body.get("all"))
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    targets: list[str] = []
+    if single:
+        targets = [sanitize_topic_id(str(single))]
+    elif isinstance(many, list) and many:
+        targets = [sanitize_topic_id(str(x)) for x in many]
+    elif all_devices:
+        targets = [sanitize_topic_id(str(k)) for k in reg.keys()]
+    else:
+        return jsonify({"ok": False, "error": "Provide device_id, device_ids, or all=true"}), 400
+
+    sent: list[str] = []
+    skipped: list[str] = []
+
+    for did in targets:
+        rec = reg.get(did)
+        if not isinstance(rec, dict):
+            skipped.append(did)
+            continue
+
+        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        try:
+            publish_update(site_id, did, command_id)
+            sent.append(did)
+        except Exception:
+            skipped.append(did)
+
+    return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
 if __name__ == "__main__":
     # 0.0.0.0 so the device can reach it on the LAN
