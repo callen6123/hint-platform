@@ -395,6 +395,233 @@ def fleet_build_and_update():
 
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
+
+# Dashboard HTML shell route
+@app.get("/dashboard")
+def dashboard():
+    # Public HTML shell; API operations are still protected by X-Api-Key.
+    html = """<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Hint Hub Dashboard</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+    header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    input[type=password] { padding: 6px 8px; min-width: 260px; }
+    button { padding: 6px 10px; cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; margin-top: 14px; }
+    th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; background: #f7f7f7; }
+    .status-online { color: #0a7; font-weight: 600; }
+    .status-offline { color: #a00; font-weight: 600; }
+    .muted { color: #666; }
+    .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .log { margin-top: 14px; padding: 10px; background: #111; color: #eee; border-radius: 6px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; font-size: 12px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .right { margin-left: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class=\"controls\">
+      <label>API Key: <input id=\"apiKey\" type=\"password\" placeholder=\"X-Api-Key\" /></label>
+      <button id=\"saveKey\">Save</button>
+      <span class=\"muted\">Saved locally in this browser.</span>
+    </div>
+    <div class=\"controls right\">
+      <label><input id=\"autoRefresh\" type=\"checkbox\" /> Auto-refresh (5s)</label>
+      <button id=\"refresh\">Refresh</button>
+      <button id=\"updateAll\">Update All</button>
+      <button id=\"buildUpdateAll\">Build+Update All</button>
+    </div>
+  </header>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Device</th>
+        <th>Status</th>
+        <th>Last Seen (UTC)</th>
+        <th>Agent</th>
+        <th>Setup</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id=\"tbody\">
+      <tr><td colspan=\"6\" class=\"muted\">Loading…</td></tr>
+    </tbody>
+  </table>
+
+  <div class=\"log\" id=\"log\"></div>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const logEl = $(\"log\");
+
+  function log(msg){
+    const ts = new Date().toISOString();
+    logEl.textContent += `[${ts}] ${msg}\\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function getKey(){
+    return localStorage.getItem('hint_api_key') || '';
+  }
+
+  function setKey(v){
+    localStorage.setItem('hint_api_key', v);
+  }
+
+  async function api(path, method, body){
+    const key = getKey();
+    const opts = {
+      method,
+      headers: {
+        'X-Api-Key': key,
+        'Content-Type': 'application/json'
+      }
+    };
+    if (body) opts.body = JSON.stringify(body);
+
+    const res = await fetch(path, opts);
+    const txt = await res.text();
+    let data;
+    try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
+    }
+    return data;
+  }
+
+  function statusClass(s){
+    return (s === 'online') ? 'status-online' : 'status-offline';
+  }
+
+  function fmt(v){
+    return v == null ? '' : String(v);
+  }
+
+  async function refresh(){
+    try {
+      const data = await api('/fleet/status', 'GET');
+      const devices = data.devices || [];
+      render(devices);
+      log(`Refreshed: ${devices.length} devices`);
+    } catch (e) {
+      render([]);
+      log(`Refresh failed: ${e.message}`);
+    }
+  }
+
+  function render(devices){
+    const tbody = $(\"tbody\");
+    if (!devices.length){
+      tbody.innerHTML = `<tr><td colspan=\"6\" class=\"muted\">No devices.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = devices.map(d => {
+      const did = fmt(d.device_id);
+      const st = fmt(d.status || 'unknown');
+      const ls = fmt(d.last_seen || '');
+      const av = fmt(d.agent_version || '');
+      const sv = fmt(d.setup_version || '');
+      return `
+        <tr>
+          <td><span class=\"pill\">${did}</span></td>
+          <td class=\"${statusClass(st)}\">${st}</td>
+          <td class=\"muted\">${ls}</td>
+          <td>${av}</td>
+          <td>${sv}</td>
+          <td>
+            <div class=\"row-actions\">
+              <button data-action=\"update\" data-device=\"${did}\">Update</button>
+              <button data-action=\"buildUpdate\" data-device=\"${did}\">Build+Update</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('button[data-action]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const action = btn.getAttribute('data-action');
+        const device = btn.getAttribute('data-device');
+        try {
+          btn.disabled = true;
+          if (action === 'update') {
+            log(`Updating ${device}...`);
+            const r = await api('/fleet/update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
+            log(`Update result: ${JSON.stringify(r)}`);
+          } else {
+            log(`Build+Update ${device}...`);
+            const r = await api('/fleet/build-and-update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
+            log(`Build+Update result: ${JSON.stringify(r)}`);
+          }
+          await refresh();
+        } catch (e) {
+          log(`Action failed for ${device}: ${e.message}`);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  $(\"apiKey\").value = getKey();
+  $(\"saveKey\").addEventListener('click', () => {
+    setKey($(\"apiKey\").value || '');
+    log('Saved API key to localStorage');
+  });
+
+  $(\"refresh\").addEventListener('click', refresh);
+
+  $(\"updateAll\").addEventListener('click', async () => {
+    try {
+      log('Update All...');
+      const r = await api('/fleet/update', 'POST', { all: true, command_id: `ota-all-${Date.now()}` });
+      log(`Update All result: ${JSON.stringify(r)}`);
+      await refresh();
+    } catch (e) {
+      log(`Update All failed: ${e.message}`);
+    }
+  });
+
+  $(\"buildUpdateAll\").addEventListener('click', async () => {
+    try {
+      log('Build+Update All...');
+      const r = await api('/fleet/build-and-update', 'POST', { all: true, command_id: `ota-build-all-${Date.now()}` });
+      log(`Build+Update All result: ${JSON.stringify(r)}`);
+      await refresh();
+    } catch (e) {
+      log(`Build+Update All failed: ${e.message}`);
+    }
+  });
+
+  let t = null;
+  $(\"autoRefresh\").addEventListener('change', (ev) => {
+    if (ev.target.checked) {
+      if (t) clearInterval(t);
+      t = setInterval(refresh, 5000);
+      log('Auto-refresh enabled');
+    } else {
+      if (t) clearInterval(t);
+      t = null;
+      log('Auto-refresh disabled');
+    }
+  });
+
+  refresh();
+})();
+</script>
+</body>
+</html>"""
+    return html
+
 if __name__ == "__main__":
     # 0.0.0.0 so the device can reach it on the LAN
     app.run(host="0.0.0.0", port=5000)
