@@ -6,6 +6,8 @@ import hashlib
 import shutil
 import tempfile
 import urllib.request
+import os
+import sys
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
@@ -25,6 +27,30 @@ SETUP_CURRENT = Path("/opt/hint/device_setup_current")
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
         return json.load(f)
+
+
+def _symlink_target_name(p: Path) -> str | None:
+    """Return the final path component of the resolved symlink target, or None."""
+    try:
+        return p.resolve().name
+    except Exception:
+        return None
+
+
+def current_versions() -> dict:
+    agent_ver = _symlink_target_name(AGENT_CURRENT)
+    setup_ver = _symlink_target_name(SETUP_CURRENT)
+
+    # If symlinks still point to the legacy fixed folders, normalize to "legacy"
+    if agent_ver == "agent":
+        agent_ver = "legacy"
+    if setup_ver == "device_setup":
+        setup_ver = "legacy"
+
+    return {
+        "agent_version": agent_ver,
+        "setup_version": setup_ver,
+    }
 
 
 def _find_usb_card() -> str | None:
@@ -160,8 +186,8 @@ def do_ota_update(prov: dict) -> None:
     SETUP_CURRENT.unlink(missing_ok=True)
     SETUP_CURRENT.symlink_to(setup_dst)
 
-    # Restart services
-    run(["systemctl", "restart", "hint-agent"])
+    # Restart setup so provisioning UI (if ever used again) runs the updated code.
+    # Do NOT restart hint-agent from inside itself; we will exit after ACK and let systemd restart.
     run(["systemctl", "restart", "hint-setup"])
 
 
@@ -189,7 +215,9 @@ def main() -> None:
     )
 
     # Last Will: mark offline if we disappear
-    c.will_set(state_t, json.dumps({"device_id": device_id, "status": "OFFLINE", "ts": int(time.time())}), qos=1, retain=True)
+    will_payload = {"device_id": device_id, "status": "OFFLINE", "ts": int(time.time())}
+    will_payload.update(current_versions())
+    c.will_set(state_t, json.dumps(will_payload), qos=1, retain=True)
 
     if username:
         c.username_pw_set(username, password)
@@ -207,7 +235,9 @@ def main() -> None:
         # Subscribe after connect so reconnects recover automatically
         client.subscribe(cmd_t, qos=1)
         # Mark online
-        client.publish(state_t, json.dumps({"device_id": device_id, "status": "ONLINE", "ts": int(time.time())}), qos=1, retain=True)
+        online_payload = {"device_id": device_id, "status": "ONLINE", "ts": int(time.time())}
+        online_payload.update(current_versions())
+        client.publish(state_t, json.dumps(online_payload), qos=1, retain=True)
 
     def on_message(client, userdata, msg):
         # Payload may be bytes; decode safely
@@ -224,12 +254,19 @@ def main() -> None:
         publish_ack(str(cid), "accepted")
 
         try:
-            if d.get("cmd") == "update":
+            is_update = d.get("cmd") == "update"
+            if is_update:
                 do_ota_update(prov)
             else:
                 play()
 
             publish_ack(str(cid), "completed")
+
+            # If this was an OTA update, exit so systemd restarts us cleanly on the new code.
+            if is_update:
+                # Give the publish a moment to flush.
+                time.sleep(0.5)
+                os._exit(0)
 
         except Exception as e:
             publish_ack(str(cid), f"error:{e}")
@@ -245,7 +282,9 @@ def main() -> None:
 
     # Heartbeat: keep a retained status so the hub can see liveness
     while True:
-        c.publish(state_t, json.dumps({"device_id": device_id, "status": "IDLE", "ts": int(time.time())}), qos=1, retain=True)
+        idle_payload = {"device_id": device_id, "status": "IDLE", "ts": int(time.time())}
+        idle_payload.update(current_versions())
+        c.publish(state_t, json.dumps(idle_payload), qos=1, retain=True)
         time.sleep(5)
 
 
