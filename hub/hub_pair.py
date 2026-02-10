@@ -17,6 +17,90 @@ REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 OTA_DIR = Path("/opt/hint/ota")
 BUILD_OTA_SCRIPT = Path("/home/hub/hint-platform/hub/build_ota.py")
 
+# In-memory rollout jobs (simple, single-hub process). For durability later, persist to REGISTRY_DIR.
+ROLLOUTS: dict[str, dict] = {}
+
+
+def _rollout_new_id() -> str:
+    return sanitize_topic_id(f"roll-{int(time.time())}-{secrets.token_hex(4)}")
+
+
+def _device_ack_for(rec: dict, command_id: str) -> dict | None:
+    ack = rec.get("last_ack") if isinstance(rec, dict) else None
+    if isinstance(ack, dict) and ack.get("command_id") == command_id:
+        return ack
+    return None
+
+
+def _advance_rollout(job: dict, reg: dict) -> None:
+    """Advance rollout state by inspecting devices.json for matching last_ack."""
+    if not job or job.get("state") not in ("running", "building"):
+        return
+
+    # If we were building, mark running once build completes (build occurs synchronously in start).
+    if job.get("state") == "building":
+        job["state"] = "running"
+
+    inflight: dict = job.get("in_flight") or {}
+    done: dict = job.get("done") or {}
+    failed: dict = job.get("failed") or {}
+
+    # Resolve in-flight devices
+    resolved = []
+    for did, cid in inflight.items():
+        rec = reg.get(did)
+        if not isinstance(rec, dict):
+            continue
+        ack = _device_ack_for(rec, cid)
+        if not ack:
+            continue
+
+        st = str(ack.get("status", "")).lower()
+        if st == "completed":
+            done[did] = ack
+            resolved.append(did)
+        elif st == "error" or st.startswith("error"):
+            failed[did] = ack
+            resolved.append(did)
+
+    for did in resolved:
+        inflight.pop(did, None)
+
+    job["in_flight"] = inflight
+    job["done"] = done
+    job["failed"] = failed
+
+    # If nothing in-flight, dispatch next batch
+    if inflight:
+        return
+
+    pending: list[str] = job.get("pending") or []
+    if not pending:
+        job["state"] = "completed" if not failed else "completed_with_failures"
+        job["finished_at"] = utc_now_iso()
+        return
+
+    batch_size = int(job.get("batch_size") or 1)
+    next_batch = pending[:batch_size]
+    job["pending"] = pending[batch_size:]
+
+    # Publish updates for the batch
+    for did in next_batch:
+        rec = reg.get(did)
+        if not isinstance(rec, dict):
+            failed[did] = {"status": "error", "error": "missing_registry"}
+            continue
+        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        cid = sanitize_topic_id(f"{job['id']}-{did}")
+        try:
+            publish_update(site_id, did, cid)
+            inflight[did] = cid
+        except Exception as e:
+            failed[did] = {"status": "error", "error": str(e)}
+
+    job["in_flight"] = inflight
+    job["failed"] = failed
+
 def sanitize_topic_id(s: str) -> str:
     # Keep MQTT topic segments simple and safe
     return "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in s)[:64]
@@ -472,6 +556,7 @@ def ui_update():
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
 
+
 @app.post("/ui/build-and-update")
 def ui_build_and_update():
     ar = require_ui_auth()
@@ -518,6 +603,91 @@ def ui_build_and_update():
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
 
+# --- UI staged rollout endpoints ---
+
+@app.post("/ui/rollout/start")
+def ui_rollout_start():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    batch_size = int(body.get("batch_size") or 5)
+    batch_size = max(1, min(batch_size, 50))
+
+    build = bool(body.get("build"))
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    targets, err = _fleet_targets(body, reg)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    job_id = _rollout_new_id()
+    job = {
+        "id": job_id,
+        "state": "building" if build else "running",
+        "batch_size": batch_size,
+        "targets": targets,
+        "pending": list(targets),
+        "in_flight": {},
+        "done": {},
+        "failed": {},
+        "started_at": utc_now_iso(),
+    }
+
+    # Optional build step (synchronous)
+    if build:
+        if not BUILD_OTA_SCRIPT.exists():
+            return jsonify({"ok": False, "error": f"Missing build script: {BUILD_OTA_SCRIPT}"}), 500
+        try:
+            subprocess.check_call(["/usr/bin/python3", str(BUILD_OTA_SCRIPT)])
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"OTA build failed: {e}"}), 500
+
+    # Dispatch first batch immediately
+    _advance_rollout(job, reg)
+
+    ROLLOUTS[job_id] = job
+    return jsonify({"ok": True, "job_id": job_id, "job": job})
+
+
+@app.get("/ui/rollout/status")
+def ui_rollout_status():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    job_id = request.args.get("job_id") or ""
+    job_id = sanitize_topic_id(job_id)
+    job = ROLLOUTS.get(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "unknown_job"}), 404
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    _advance_rollout(job, reg)
+
+    summary = {
+        "id": job.get("id"),
+        "state": job.get("state"),
+        "batch_size": job.get("batch_size"),
+        "targets_total": len(job.get("targets") or []),
+        "pending": len(job.get("pending") or []),
+        "in_flight": len(job.get("in_flight") or {}),
+        "done": len(job.get("done") or {}),
+        "failed": len(job.get("failed") or {}),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+    }
+
+    return jsonify({"ok": True, "job": job, "summary": summary})
+
+
 # Dashboard HTML shell route
 @app.get("/dashboard")
 def dashboard():
@@ -547,6 +717,11 @@ def dashboard():
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
     .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .right { margin-left: auto; }
+    .panel { margin-top: 14px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
+    .panel h3 { margin: 0 0 8px 0; font-size: 14px; }
+    .kv { display: flex; gap: 12px; flex-wrap: wrap; }
+    .kv div { padding: 2px 0; }
+    input[type=number] { padding: 6px 8px; width: 90px; }
   </style>
 </head>
 <body>
@@ -561,6 +736,19 @@ def dashboard():
       <button id=\"buildUpdateAll\">Build+Update All</button>
     </div>
   </header>
+
+  <div class="panel">
+    <h3>Staged Rollout</h3>
+    <div class="controls">
+      <label>Batch size: <input id="batchSize" type="number" min="1" max="50" value="5" /></label>
+      <button id="rolloutUpdateAll">Staged Update All</button>
+      <button id="rolloutBuildUpdateAll">Staged Build+Update All</button>
+      <span class="muted">Runs batches sequentially and tracks ACK completion.</span>
+    </div>
+    <div class="kv" id="rolloutStatus" style="margin-top:8px;">
+      <div class="muted">No rollout running.</div>
+    </div>
+  </div>
 
   <table>
     <thead>
@@ -686,6 +874,83 @@ def dashboard():
 
   // API key UI removed
 
+  let currentRolloutJobId = null;
+
+  function renderRollout(summary){
+    const el = $("rolloutStatus");
+    if (!summary) {
+      el.innerHTML = '<div class="muted">No rollout running.</div>';
+      return;
+    }
+    el.innerHTML = `
+      <div><span class="pill">Job</span> ${summary.id}</div>
+      <div><span class="pill">State</span> ${summary.state}</div>
+      <div><span class="pill">Total</span> ${summary.targets_total}</div>
+      <div><span class="pill">Pending</span> ${summary.pending}</div>
+      <div><span class="pill">In-flight</span> ${summary.in_flight}</div>
+      <div><span class="pill">Done</span> ${summary.done}</div>
+      <div><span class="pill">Failed</span> ${summary.failed}</div>
+    `;
+  }
+
+  async function rolloutStatusTick(){
+    if (!currentRolloutJobId) return;
+    try {
+      const data = await api(`/ui/rollout/status?job_id=${encodeURIComponent(currentRolloutJobId)}`, 'GET');
+      renderRollout(data.summary);
+      if (data.summary && (data.summary.state === 'completed' || data.summary.state === 'completed_with_failures')) {
+        log(`Rollout finished: ${JSON.stringify(data.summary)}`);
+        // keep showing final status; stop polling progression
+      }
+    } catch (e) {
+      log(`Rollout status failed: ${e.message}`);
+    }
+  }
+
+  $("rolloutUpdateAll").addEventListener('click', async () => {
+    try {
+      const bs = parseInt($("batchSize").value || '5', 10);
+      log(`Starting staged rollout (update), batch_size=${bs}...`);
+      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: false });
+      currentRolloutJobId = r.job_id;
+      renderRollout(r.job ? {
+        id: r.job.id,
+        state: r.job.state,
+        targets_total: (r.job.targets||[]).length,
+        pending: (r.job.pending||[]).length,
+        in_flight: Object.keys(r.job.in_flight||{}).length,
+        done: Object.keys(r.job.done||{}).length,
+        failed: Object.keys(r.job.failed||{}).length,
+      } : null);
+      log(`Rollout started: ${currentRolloutJobId}`);
+      await rolloutStatusTick();
+    } catch (e) {
+      log(`Rollout start failed: ${e.message}`);
+    }
+  });
+
+  $("rolloutBuildUpdateAll").addEventListener('click', async () => {
+    try {
+      const bs = parseInt($("batchSize").value || '5', 10);
+      log(`Starting staged rollout (build+update), batch_size=${bs}...`);
+      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: true });
+      currentRolloutJobId = r.job_id;
+      renderRollout(r.job ? {
+        id: r.job.id,
+        state: r.job.state,
+        targets_total: (r.job.targets||[]).length,
+        pending: (r.job.pending||[]).length,
+        in_flight: Object.keys(r.job.in_flight||{}).length,
+        done: Object.keys(r.job.done||{}).length,
+        failed: Object.keys(r.job.failed||{}).length,
+      } : null);
+      log(`Rollout started: ${currentRolloutJobId}`);
+      await rolloutStatusTick();
+    } catch (e) {
+      log(`Rollout start failed: ${e.message}`);
+    }
+  });
+
   $(\"refresh\").addEventListener('click', refresh);
 
   $(\"updateAll\").addEventListener('click', async () => {
@@ -712,7 +977,10 @@ def dashboard():
 
   // Auto-refresh always on, no toggle
   refresh();
-  setInterval(refresh, 5000);
+  setInterval(() => {
+    refresh();
+    rolloutStatusTick();
+  }, 5000);
 })();
 </script>
 </body>
