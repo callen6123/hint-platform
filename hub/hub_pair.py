@@ -427,12 +427,10 @@ def dashboard():
 <body>
   <header>
     <div class=\"controls\">
-      <label>API Key: <input id=\"apiKey\" type=\"password\" placeholder=\"X-Api-Key\" /></label>
-      <button id=\"saveKey\">Save</button>
-      <span class=\"muted\">Saved locally in this browser.</span>
+      <span class=\"pill\">Hint Hub Dashboard</span>
+      <span class=\"muted\">Auto-refresh: 5s</span>
     </div>
     <div class=\"controls right\">
-      <label><input id=\"autoRefresh\" type=\"checkbox\" /> Auto-refresh (5s)</label>
       <button id=\"refresh\">Refresh</button>
       <button id=\"updateAll\">Update All</button>
       <button id=\"buildUpdateAll\">Build+Update All</button>
@@ -468,20 +466,13 @@ def dashboard():
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  function getKey(){
-    return localStorage.getItem('hint_api_key') || '';
-  }
-
-  function setKey(v){
-    localStorage.setItem('hint_api_key', v);
-  }
+  const API_KEY = "__API_KEY__";
 
   async function api(path, method, body){
-    const key = getKey();
     const opts = {
       method,
       headers: {
-        'X-Api-Key': key,
+        'X-Api-Key': API_KEY,
         'Content-Type': 'application/json'
       }
     };
@@ -510,7 +501,6 @@ def dashboard():
       const data = await api('/fleet/status', 'GET');
       const devices = data.devices || [];
       render(devices);
-      log(`Refreshed: ${devices.length} devices`);
     } catch (e) {
       render([]);
       log(`Refresh failed: ${e.message}`);
@@ -528,8 +518,8 @@ def dashboard():
       const did = fmt(d.device_id);
       const st = fmt(d.status || 'unknown');
       const ls = fmt(d.last_seen || '');
-      const av = fmt(d.agent_version || '');
-      const sv = fmt(d.setup_version || '');
+      const av = fmt(d.agent_version || '(unknown)');
+      const sv = fmt(d.setup_version || '(unknown)');
       return `
         <tr>
           <td><span class=\"pill\">${did}</span></td>
@@ -572,11 +562,7 @@ def dashboard():
     });
   }
 
-  $(\"apiKey\").value = getKey();
-  $(\"saveKey\").addEventListener('click', () => {
-    setKey($(\"apiKey\").value || '');
-    log('Saved API key to localStorage');
-  });
+  // API key UI removed
 
   $(\"refresh\").addEventListener('click', refresh);
 
@@ -602,25 +588,15 @@ def dashboard():
     }
   });
 
-  let t = null;
-  $(\"autoRefresh\").addEventListener('change', (ev) => {
-    if (ev.target.checked) {
-      if (t) clearInterval(t);
-      t = setInterval(refresh, 5000);
-      log('Auto-refresh enabled');
-    } else {
-      if (t) clearInterval(t);
-      t = null;
-      log('Auto-refresh disabled');
-    }
-  });
-
+  // Auto-refresh always on, no toggle
   refresh();
+  setInterval(refresh, 5000);
 })();
 </script>
 </body>
 </html>"""
-    return html
+    api_key = os.environ.get("HINT_DASH_API_KEY", "")
+    return html.replace("__API_KEY__", api_key)
 
 if __name__ == "__main__":
     # 0.0.0.0 so the device can reach it on the LAN
