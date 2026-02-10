@@ -15,7 +15,8 @@ HUB_MQTT_USER = os.environ.get("HUB_MQTT_USER", "hubadmin")
 HUB_MQTT_PASS = os.environ.get("HUB_MQTT_PASS", "devpass123")
 SITE_ID = os.environ.get("HUB_SITE_ID", "demo")
 
-STATE_TOPIC = f"site/{SITE_ID}/device/+/state"
+# Watch all sites (devices publish their own site_id in topics).
+STATE_TOPIC = "site/+/device/+/state"
 
 
 def utc_now_iso() -> str:
@@ -38,11 +39,11 @@ def write_registry(reg: dict) -> None:
     tmp.replace(REGISTRY_PATH)
 
 
-def topic_device_id(topic: str) -> str | None:
+def topic_site_and_device_id(topic: str) -> tuple[str, str] | None:
     # topic: site/<site>/device/<device_id>/state
     parts = topic.split("/")
     if len(parts) >= 5 and parts[0] == "site" and parts[2] == "device":
-        return parts[3]
+        return parts[1], parts[3]
     return None
 
 
@@ -51,9 +52,10 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    dev_id = topic_device_id(msg.topic)
-    if not dev_id:
+    parsed = topic_site_and_device_id(msg.topic)
+    if not parsed:
         return
+    site_id, dev_id = parsed
 
     try:
         payload = json.loads(msg.payload.decode("utf-8", errors="replace"))
@@ -68,7 +70,9 @@ def on_message(client, userdata, msg):
     reg = read_registry()
     rec = reg.get(dev_id) if isinstance(reg, dict) else None
     if not isinstance(rec, dict):
-        rec = {"device_id": dev_id, "site_id": SITE_ID}
+        rec = {"device_id": dev_id, "site_id": site_id}
+    elif not rec.get("site_id"):
+        rec["site_id"] = site_id
 
     rec["last_seen"] = utc_now_iso()
     rec["status"] = status
