@@ -62,6 +62,8 @@ def on_message(client, userdata, msg):
 
     raw_status = str(payload.get("status", "")).upper()
     status = "offline" if raw_status == "OFFLINE" else "online"
+    agent_version = payload.get("agent_version")
+    setup_version = payload.get("setup_version")
 
     reg = read_registry()
     rec = reg.get(dev_id) if isinstance(reg, dict) else None
@@ -70,6 +72,11 @@ def on_message(client, userdata, msg):
 
     rec["last_seen"] = utc_now_iso()
     rec["status"] = status
+
+    if agent_version is not None:
+        rec["agent_version"] = agent_version
+    if setup_version is not None:
+        rec["setup_version"] = setup_version
 
     # Preserve paired_at/mqtt_user if already present
     reg[dev_id] = rec
