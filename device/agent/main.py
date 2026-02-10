@@ -27,26 +27,55 @@ def load_provision() -> dict:
         return json.load(f)
 
 
+def _find_usb_card() -> str | None:
+    # Parse /proc/asound/cards. Example lines:
+    #  0 [Device         ]: USB-Audio - USB Audio Device
+    try:
+        txt = Path("/proc/asound/cards").read_text()
+    except Exception:
+        return None
+
+    for line in txt.splitlines():
+        # lines with: 'N [CARDID ]: ... - ...'
+        if "[" in line and "]" in line and ":" in line:
+            # crude but effective
+            if "USB" in line or "usb" in line:
+                # extract CARDID between [...]
+                cardid = line.split("[", 1)[1].split("]", 1)[0].strip()
+                if cardid:
+                    return cardid
+    return None
+
+
 def play() -> None:
     if not AUDIO_PATH.exists():
         print(f"[AUDIO] missing file: {AUDIO_PATH}")
         return
 
-    cmd = ["aplay", str(AUDIO_PATH)]
-    try:
+    card = _find_usb_card()
+    if card:
+        cmd = ["aplay", "-D", f"hw:{card},0", str(AUDIO_PATH)]
+    else:
+        cmd = ["aplay", str(AUDIO_PATH)]
+
+    # Retry a few times to handle USB “not ready” moments
+    for attempt in range(1, 6):
         res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            err = (res.stderr or "").strip()
-            out = (res.stdout or "").strip()
-            print(f"[AUDIO] aplay failed rc={res.returncode} cmd={cmd}")
-            if out:
-                print(f"[AUDIO] stdout: {out}")
-            if err:
-                print(f"[AUDIO] stderr: {err}")
-        else:
-            print(f"[AUDIO] played {AUDIO_PATH}")
-    except Exception as e:
-        print(f"[AUDIO] exception running aplay: {e}")
+        if res.returncode == 0:
+            print(f"[AUDIO] played {AUDIO_PATH} via {cmd}")
+            return
+
+        err = (res.stderr or "").strip()
+        out = (res.stdout or "").strip()
+        print(f"[AUDIO] attempt {attempt}/5 failed rc={res.returncode} cmd={cmd}")
+        if out:
+            print(f"[AUDIO] stdout: {out}")
+        if err:
+            print(f"[AUDIO] stderr: {err}")
+
+        time.sleep(0.5)
+
+    print("[AUDIO] giving up after retries")
 
 
 def sha256_file(p: Path) -> str:
