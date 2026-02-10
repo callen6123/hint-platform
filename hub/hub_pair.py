@@ -15,6 +15,7 @@ PAIR_CODE = "483921"  # you will type this into the device setup page
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 OTA_DIR = Path("/opt/hint/ota")
+BUILD_OTA_SCRIPT = Path("/home/hub/hint-platform/hub/build_ota.py")
 
 def sanitize_topic_id(s: str) -> str:
     # Keep MQTT topic segments simple and safe
@@ -277,16 +278,28 @@ def publish_update(site_id: str, device_id: str, command_id: str) -> None:
     )
 
 
+
+def _fleet_targets(body: dict, reg: dict) -> tuple[list[str], str | None]:
+    """Return (targets, error). Targets are sanitized device IDs."""
+    single = body.get("device_id")
+    many = body.get("device_ids")
+    all_devices = bool(body.get("all"))
+
+    if single:
+        return [sanitize_topic_id(str(single))], None
+    if isinstance(many, list) and many:
+        return [sanitize_topic_id(str(x)) for x in many], None
+    if all_devices:
+        return [sanitize_topic_id(str(k)) for k in reg.keys()], None
+
+    return [], "Provide device_id, device_ids, or all=true"
+
+
 @app.post("/fleet/update")
 def fleet_update():
     require_dashboard_key()
 
     body = request.get_json(silent=True) or {}
-
-    # Targeting
-    single = body.get("device_id")
-    many = body.get("device_ids")
-    all_devices = bool(body.get("all"))
 
     command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
 
@@ -294,15 +307,75 @@ def fleet_update():
     if not isinstance(reg, dict):
         reg = {}
 
-    targets: list[str] = []
-    if single:
-        targets = [sanitize_topic_id(str(single))]
-    elif isinstance(many, list) and many:
-        targets = [sanitize_topic_id(str(x)) for x in many]
-    elif all_devices:
-        targets = [sanitize_topic_id(str(k)) for k in reg.keys()]
-    else:
-        return jsonify({"ok": False, "error": "Provide device_id, device_ids, or all=true"}), 400
+    targets, err = _fleet_targets(body, reg)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    sent: list[str] = []
+    skipped: list[str] = []
+
+    for did in targets:
+        rec = reg.get(did)
+        if not isinstance(rec, dict):
+            skipped.append(did)
+            continue
+
+        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        try:
+            publish_update(site_id, did, command_id)
+            sent.append(did)
+        except Exception:
+            skipped.append(did)
+
+    return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
+
+
+@app.get("/fleet/status")
+def fleet_status():
+    require_dashboard_key()
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    devices = []
+    for did, rec in reg.items():
+        if not isinstance(rec, dict):
+            continue
+        devices.append(rec)
+
+    # stable ordering
+    devices.sort(key=lambda r: str(r.get("device_id", "")))
+
+    return jsonify({"ok": True, "devices": devices})
+
+
+@app.post("/fleet/build-and-update")
+def fleet_build_and_update():
+    require_dashboard_key()
+
+    body = request.get_json(silent=True) or {}
+
+    # Build OTA bundle first
+    if not BUILD_OTA_SCRIPT.exists():
+        return jsonify({"ok": False, "error": f"Missing build script: {BUILD_OTA_SCRIPT}"}), 500
+
+    try:
+        # Run build as the service user; build_ota.py already writes to /opt/hint/ota
+        subprocess.check_call(["/usr/bin/python3", str(BUILD_OTA_SCRIPT)])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"OTA build failed: {e}"}), 500
+
+    # Then publish updates
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    targets, err = _fleet_targets(body, reg)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
 
     sent: list[str] = []
     skipped: list[str] = []
