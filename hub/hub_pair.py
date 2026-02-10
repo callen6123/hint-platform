@@ -875,6 +875,7 @@ def dashboard():
   // API key UI removed
 
   let currentRolloutJobId = null;
+  let rolloutFinishedLoggedFor = null;
 
   function renderRollout(summary){
     const el = $("rolloutStatus");
@@ -899,8 +900,10 @@ def dashboard():
       const data = await api(`/ui/rollout/status?job_id=${encodeURIComponent(currentRolloutJobId)}`, 'GET');
       renderRollout(data.summary);
       if (data.summary && (data.summary.state === 'completed' || data.summary.state === 'completed_with_failures')) {
-        log(`Rollout finished: ${JSON.stringify(data.summary)}`);
-        // keep showing final status; stop polling progression
+        if (rolloutFinishedLoggedFor !== currentRolloutJobId) {
+          log(`Rollout finished: ${JSON.stringify(data.summary)}`);
+          rolloutFinishedLoggedFor = currentRolloutJobId;
+        }
       }
     } catch (e) {
       log(`Rollout status failed: ${e.message}`);
@@ -913,6 +916,7 @@ def dashboard():
       log(`Starting staged rollout (update), batch_size=${bs}...`);
       const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: false });
       currentRolloutJobId = r.job_id;
+      rolloutFinishedLoggedFor = null;
       renderRollout(r.job ? {
         id: r.job.id,
         state: r.job.state,
@@ -935,6 +939,7 @@ def dashboard():
       log(`Starting staged rollout (build+update), batch_size=${bs}...`);
       const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: true });
       currentRolloutJobId = r.job_id;
+      rolloutFinishedLoggedFor = null;
       renderRollout(r.job ? {
         id: r.job.id,
         state: r.job.state,
