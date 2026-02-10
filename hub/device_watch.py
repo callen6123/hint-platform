@@ -17,6 +17,7 @@ SITE_ID = os.environ.get("HUB_SITE_ID", "demo")
 
 # Watch all sites (devices publish their own site_id in topics).
 STATE_TOPIC = "site/+/device/+/state"
+ACK_TOPIC = "site/+/device/+/ack"
 
 
 def utc_now_iso() -> str:
@@ -39,23 +40,24 @@ def write_registry(reg: dict) -> None:
     tmp.replace(REGISTRY_PATH)
 
 
-def topic_site_and_device_id(topic: str) -> tuple[str, str] | None:
-    # topic: site/<site>/device/<device_id>/state
+def topic_site_device_kind(topic: str) -> tuple[str, str, str] | None:
+    # topic: site/<site>/device/<device_id>/(state|ack)
     parts = topic.split("/")
     if len(parts) >= 5 and parts[0] == "site" and parts[2] == "device":
-        return parts[1], parts[3]
+        return parts[1], parts[3], parts[4]
     return None
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(STATE_TOPIC, qos=1)
+    client.subscribe(ACK_TOPIC, qos=1)
 
 
 def on_message(client, userdata, msg):
-    parsed = topic_site_and_device_id(msg.topic)
+    parsed = topic_site_device_kind(msg.topic)
     if not parsed:
         return
-    site_id, dev_id = parsed
+    site_id, dev_id, kind = parsed
 
     try:
         payload = json.loads(msg.payload.decode("utf-8", errors="replace"))
@@ -64,6 +66,8 @@ def on_message(client, userdata, msg):
 
     raw_status = str(payload.get("status", "")).upper()
     status = "offline" if raw_status == "OFFLINE" else "online"
+
+    # These exist on state and on newer agent ACKs; we persist them whenever present.
     agent_version = payload.get("agent_version")
     setup_version = payload.get("setup_version")
 
@@ -74,9 +78,26 @@ def on_message(client, userdata, msg):
     elif not rec.get("site_id"):
         rec["site_id"] = site_id
 
-    rec["last_seen"] = utc_now_iso()
-    rec["status"] = status
+    now = utc_now_iso()
 
+    if kind == "state":
+        rec["last_seen"] = now
+        rec["status"] = status
+
+    elif kind == "ack":
+        # Store the most recent command ack for dashboard/rollout progress.
+        rec["last_ack_at"] = now
+        rec["last_ack"] = payload
+
+        # Convenience fields for rollouts
+        if payload.get("command_id"):
+            rec["last_command_id"] = payload.get("command_id")
+        if payload.get("status"):
+            rec["last_command_status"] = payload.get("status")
+        if isinstance(payload.get("details"), dict):
+            rec["last_command_details"] = payload.get("details")
+
+    # Persist versions whenever present
     if agent_version is not None:
         rec["agent_version"] = agent_version
     if setup_version is not None:

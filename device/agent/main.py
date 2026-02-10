@@ -116,7 +116,7 @@ def run(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
 
 
-def do_ota_update(prov: dict) -> None:
+def do_ota_update(prov: dict) -> dict:
     ota = prov.get("ota")
     if not isinstance(ota, dict):
         raise RuntimeError("No OTA info in provision.json")
@@ -138,6 +138,14 @@ def do_ota_update(prov: dict) -> None:
     ver = latest["version"]
     fname = latest["filename"]
     want_sha = latest["sha256"]
+
+    cur = current_versions().get("agent_version")
+    if cur == ver:
+        return {
+            "result": "already_latest",
+            "from_version": cur,
+            "to_version": ver,
+        }
 
     file_url = f"{base}/ota/file/{fname}?{params}"
 
@@ -190,6 +198,12 @@ def do_ota_update(prov: dict) -> None:
     # Do NOT restart hint-agent from inside itself; we will exit after ACK and let systemd restart.
     run(["systemctl", "restart", "hint-setup"])
 
+    return {
+        "result": "updated",
+        "from_version": cur,
+        "to_version": ver,
+    }
+
 
 def main() -> None:
     prov = load_provision()
@@ -222,13 +236,16 @@ def main() -> None:
     if username:
         c.username_pw_set(username, password)
 
-    def publish_ack(command_id: str, status: str) -> None:
+    def publish_ack(command_id: str, status: str, details: dict | None = None) -> None:
         payload = {
             "device_id": device_id,
             "command_id": command_id,
             "status": status,
             "ts": int(time.time()),
         }
+        payload.update(current_versions())
+        if details is not None:
+            payload["details"] = details
         c.publish(ack_t, json.dumps(payload), qos=1, retain=False)
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -254,22 +271,29 @@ def main() -> None:
         publish_ack(str(cid), "accepted")
 
         try:
-            is_update = d.get("cmd") == "update"
-            if is_update:
-                do_ota_update(prov)
-            else:
+            cmd = d.get("cmd")
+
+            if cmd == "update":
+                res = do_ota_update(prov)
+                # completed with details, so hub can track progress
+                publish_ack(str(cid), "completed", res)
+
+                # If we actually applied a new version, exit so systemd restarts on the new code.
+                if res.get("result") == "updated":
+                    time.sleep(0.5)
+                    os._exit(0)
+
+            elif cmd == "play":
                 play()
+                publish_ack(str(cid), "completed")
 
-            publish_ack(str(cid), "completed")
-
-            # If this was an OTA update, exit so systemd restarts us cleanly on the new code.
-            if is_update:
-                # Give the publish a moment to flush.
-                time.sleep(0.5)
-                os._exit(0)
+            else:
+                # Back-compat: treat unknown command as play test
+                play()
+                publish_ack(str(cid), "completed")
 
         except Exception as e:
-            publish_ack(str(cid), f"error:{e}")
+            publish_ack(str(cid), "error", {"error": str(e)})
 
     c.on_connect = on_connect
     c.on_message = on_message
