@@ -758,11 +758,13 @@ def dashboard():
         <th>Last Seen (UTC)</th>
         <th>Agent</th>
         <th>Setup</th>
+        <th>Last Cmd</th>
+        <th>Last Result</th>
         <th>Actions</th>
       </tr>
     </thead>
     <tbody id=\"tbody\">
-      <tr><td colspan=\"6\" class=\"muted\">Loading…</td></tr>
+      <tr><td colspan=\"8\" class=\"muted\">Loading…</td></tr>
     </tbody>
   </table>
 
@@ -806,6 +808,26 @@ def dashboard():
     return v == null ? '' : String(v);
   }
 
+  function lastCmd(d){
+    const cid = fmt(d.last_command_id || '');
+    const st = fmt(d.last_command_status || '');
+    if (!cid && !st) return '';
+    return `${cid}${st ? ' (' + st + ')' : ''}`;
+  }
+
+  function lastResult(d){
+    const det = d.last_command_details || null;
+    if (!det || typeof det !== 'object') return '';
+    const r = fmt(det.result || '');
+    const fv = fmt(det.from_version || '');
+    const tv = fmt(det.to_version || '');
+    if (!r && !fv && !tv) return '';
+    if (fv || tv) {
+      return `${r}${fv || tv ? ' ' + fv + '→' + tv : ''}`.trim();
+    }
+    return r;
+  }
+
   async function refresh(){
     try {
       const data = await api('/ui/status', 'GET');
@@ -820,7 +842,7 @@ def dashboard():
   function render(devices){
     const tbody = $(\"tbody\");
     if (!devices.length){
-      tbody.innerHTML = `<tr><td colspan=\"6\" class=\"muted\">No devices.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan=\"8\" class=\"muted\">No devices.</td></tr>`;
       return;
     }
 
@@ -830,6 +852,8 @@ def dashboard():
       const ls = fmt(d.last_seen || '');
       const av = fmt(d.agent_version || '(unknown)');
       const sv = fmt(d.setup_version || '(unknown)');
+      const lc = lastCmd(d);
+      const lr = lastResult(d);
       return `
         <tr>
           <td><span class=\"pill\">${did}</span></td>
@@ -837,6 +861,8 @@ def dashboard():
           <td class=\"muted\">${ls}</td>
           <td>${av}</td>
           <td>${sv}</td>
+          <td class=\"muted\">${lc}</td>
+          <td class=\"muted\">${lr}</td>
           <td>
             <div class=\"row-actions\">
               <button data-action=\"update\" data-device=\"${did}\">Update</button>
