@@ -768,6 +768,32 @@ def ui_rollout_resume():
     if job.get("state") != "halted":
         return jsonify({"ok": False, "error": "not_halted", "state": job.get("state")}), 400
 
+    # Resume should retry devices that previously failed, then continue remaining pending.
+    failed_map = job.get("failed") or {}
+    failed_ids = list(failed_map.keys()) if isinstance(failed_map, dict) else []
+
+    pending = job.get("pending") or []
+    if not isinstance(pending, list):
+        pending = []
+
+    inflight = job.get("in_flight") or {}
+    if not isinstance(inflight, dict):
+        inflight = {}
+
+    # Requeue failed devices at the front, preserving order and removing duplicates.
+    new_pending: list[str] = []
+    for did in failed_ids + pending:
+        did = sanitize_topic_id(str(did))
+        if not did:
+            continue
+        if did in inflight:
+            continue
+        if did not in new_pending:
+            new_pending.append(did)
+
+    job["pending"] = new_pending
+    job["failed"] = {}
+
     job["state"] = "running"
     job["halted_reason"] = None
     job.pop("finished_at", None)
