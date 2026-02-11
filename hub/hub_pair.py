@@ -82,6 +82,20 @@ def _advance_rollout(job: dict, reg: dict) -> None:
     job["done"] = done
     job["failed"] = failed
 
+    # Safety: halt further dispatch if failures have reached threshold
+    if job.get("stop_on_failure"):
+        max_failures = int(job.get("max_failures") or 0)
+        if max_failures == 0 and len(failed) > 0:
+            job["state"] = "halted"
+            job["halted_reason"] = f"failure:{len(failed)}"
+            job["finished_at"] = utc_now_iso()
+            return
+        if max_failures > 0 and len(failed) >= max_failures:
+            job["state"] = "halted"
+            job["halted_reason"] = f"failures_reached:{len(failed)}>={max_failures}"
+            job["finished_at"] = utc_now_iso()
+            return
+
     # If nothing in-flight, dispatch next batch
     if inflight:
         return
@@ -112,6 +126,19 @@ def _advance_rollout(job: dict, reg: dict) -> None:
 
     job["in_flight"] = inflight
     job["failed"] = failed
+
+    if job.get("stop_on_failure"):
+        max_failures = int(job.get("max_failures") or 0)
+        if max_failures == 0 and len(failed) > 0:
+            job["state"] = "halted"
+            job["halted_reason"] = f"failure:{len(failed)}"
+            job["finished_at"] = utc_now_iso()
+            return
+        if max_failures > 0 and len(failed) >= max_failures:
+            job["state"] = "halted"
+            job["halted_reason"] = f"failures_reached:{len(failed)}>={max_failures}"
+            job["finished_at"] = utc_now_iso()
+            return
 
 def sanitize_topic_id(s: str) -> str:
     # Keep MQTT topic segments simple and safe
@@ -629,6 +656,11 @@ def ui_rollout_start():
 
     build = bool(body.get("build"))
 
+    # Safety controls
+    stop_on_failure = bool(body.get("stop_on_failure", True))
+    max_failures = int(body.get("max_failures") or 1)
+    max_failures = max(0, min(max_failures, 1000))
+
     reg = read_registry()
     if not isinstance(reg, dict):
         reg = {}
@@ -648,6 +680,9 @@ def ui_rollout_start():
         "done": {},
         "failed": {},
         "started_at": utc_now_iso(),
+        "stop_on_failure": stop_on_failure,
+        "max_failures": max_failures,
+        "halted_reason": None,
     }
 
     # Optional build step (synchronous)
@@ -698,6 +733,9 @@ def ui_rollout_status():
     summary = {
         "id": job.get("id"),
         "state": job.get("state"),
+        "halted_reason": job.get("halted_reason"),
+        "stop_on_failure": bool(job.get("stop_on_failure")),
+        "max_failures": int(job.get("max_failures") or 0),
         "batch_size": job.get("batch_size"),
         "targets_total": len(job.get("targets") or []),
         "pending": len(job.get("pending") or []),
@@ -711,6 +749,54 @@ def ui_rollout_status():
     }
 
     return jsonify({"ok": True, "job": job, "summary": summary})
+
+
+# --- Resume and Cancel endpoints for rollouts ---
+
+@app.post("/ui/rollout/resume")
+def ui_rollout_resume():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    job_id = sanitize_topic_id(body.get("job_id") or "")
+    job = ROLLOUTS.get(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "unknown_job"}), 404
+
+    if job.get("state") != "halted":
+        return jsonify({"ok": False, "error": "not_halted", "state": job.get("state")}), 400
+
+    job["state"] = "running"
+    job["halted_reason"] = None
+    job.pop("finished_at", None)
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    _advance_rollout(job, reg)
+
+    return jsonify({"ok": True, "job": job})
+
+
+@app.post("/ui/rollout/cancel")
+def ui_rollout_cancel():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    job_id = sanitize_topic_id(body.get("job_id") or "")
+    job = ROLLOUTS.get(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "unknown_job"}), 404
+
+    job["state"] = "canceled"
+    job["finished_at"] = utc_now_iso()
+
+    return jsonify({"ok": True, "job": job})
 
 
 # Dashboard HTML shell route
@@ -762,12 +848,14 @@ def dashboard():
     </div>
   </header>
 
-  <div class="panel">
+    <div class="panel">
     <h3>Staged Rollout</h3>
     <div class="controls">
       <label>Batch size: <input id="batchSize" type="number" min="1" max="50" value="5" /></label>
       <button id="rolloutUpdateAll">Staged Update All</button>
       <button id="rolloutBuildUpdateAll">Staged Build+Update All</button>
+      <button id="rolloutResume" disabled>Resume</button>
+      <button id="rolloutCancel" disabled>Cancel</button>
       <span class="muted">Runs batches sequentially and tracks ACK completion.</span>
     </div>
     <div class="kv" id="rolloutStatus" style="margin-top:8px;">
@@ -932,6 +1020,10 @@ def dashboard():
     const el = $("rolloutStatus");
     if (!summary) {
       el.innerHTML = '<div class="muted">No rollout running.</div>';
+      const resumeBtn = $("rolloutResume");
+      const cancelBtn = $("rolloutCancel");
+      if (resumeBtn) resumeBtn.disabled = true;
+      if (cancelBtn) cancelBtn.disabled = true;
       return;
     }
     el.innerHTML = `
@@ -944,7 +1036,17 @@ def dashboard():
       <div><span class="pill">Updated</span> ${summary.updated ?? 0}</div>
       <div><span class="pill">Skipped</span> ${summary.skipped ?? 0}</div>
       <div><span class="pill">Failed</span> ${summary.failed}</div>
+      ${summary.state === 'halted' ? `<div><span class="pill">Reason</span> ${summary.halted_reason || ''}</div>` : ''}
+      <div><span class="pill">Stop on failure</span> ${summary.stop_on_failure ? 'true' : 'false'}</div>
+      <div><span class="pill">Max failures</span> ${summary.max_failures ?? 0}</div>
     `;
+    const resumeBtn = $("rolloutResume");
+    const cancelBtn = $("rolloutCancel");
+    if (resumeBtn && cancelBtn) {
+      const st = summary.state;
+      resumeBtn.disabled = !(st === 'halted');
+      cancelBtn.disabled = !(st && st !== 'canceled' && st !== 'completed' && st !== 'completed_with_failures');
+    }
   }
 
   async function rolloutStatusTick(){
@@ -967,7 +1069,7 @@ def dashboard():
     try {
       const bs = parseInt($("batchSize").value || '5', 10);
       log(`Starting staged rollout (update), batch_size=${bs}...`);
-      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: false });
+      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: false, stop_on_failure: true, max_failures: 1 });
       currentRolloutJobId = r.job_id;
       rolloutFinishedLoggedFor = null;
       renderRollout(r.job ? {
@@ -992,7 +1094,7 @@ def dashboard():
     try {
       const bs = parseInt($("batchSize").value || '5', 10);
       log(`Starting staged rollout (build+update), batch_size=${bs}...`);
-      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: true });
+      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: true, stop_on_failure: true, max_failures: 1 });
       currentRolloutJobId = r.job_id;
       rolloutFinishedLoggedFor = null;
       renderRollout(r.job ? {
@@ -1010,6 +1112,28 @@ def dashboard():
       await rolloutStatusTick();
     } catch (e) {
       log(`Rollout start failed: ${e.message}`);
+    }
+  });
+
+  $("rolloutResume").addEventListener('click', async () => {
+    if (!currentRolloutJobId) return;
+    try {
+      log(`Resuming rollout ${currentRolloutJobId}...`);
+      await api('/ui/rollout/resume', 'POST', { job_id: currentRolloutJobId });
+      await rolloutStatusTick();
+    } catch (e) {
+      log(`Rollout resume failed: ${e.message}`);
+    }
+  });
+
+  $("rolloutCancel").addEventListener('click', async () => {
+    if (!currentRolloutJobId) return;
+    try {
+      log(`Canceling rollout ${currentRolloutJobId}...`);
+      await api('/ui/rollout/cancel', 'POST', { job_id: currentRolloutJobId });
+      await rolloutStatusTick();
+    } catch (e) {
+      log(`Rollout cancel failed: ${e.message}`);
     }
   });
 
