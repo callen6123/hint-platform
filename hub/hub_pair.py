@@ -57,6 +57,18 @@ def _advance_rollout(job: dict, reg: dict) -> None:
 
         st = str(ack.get("status", "")).lower()
         if st == "completed":
+            # Classify: updated vs already_latest (skipped)
+            details = ack.get("details") if isinstance(ack.get("details"), dict) else {}
+            result = str(details.get("result", "")).lower()
+            if result == "already_latest":
+                ack = dict(ack)
+                ack["rollout_result"] = "skipped"
+            elif result == "updated":
+                ack = dict(ack)
+                ack["rollout_result"] = "updated"
+            else:
+                ack = dict(ack)
+                ack["rollout_result"] = "completed"
             done[did] = ack
             resolved.append(did)
         elif st == "error" or st.startswith("error"):
@@ -672,6 +684,17 @@ def ui_rollout_status():
 
     _advance_rollout(job, reg)
 
+    done_map = job.get("done") or {}
+    updated_cnt = 0
+    skipped_cnt = 0
+    for _did, _ack in done_map.items():
+        if isinstance(_ack, dict):
+            rr = str(_ack.get("rollout_result", "")).lower()
+            if rr == "updated":
+                updated_cnt += 1
+            elif rr == "skipped":
+                skipped_cnt += 1
+
     summary = {
         "id": job.get("id"),
         "state": job.get("state"),
@@ -679,8 +702,10 @@ def ui_rollout_status():
         "targets_total": len(job.get("targets") or []),
         "pending": len(job.get("pending") or []),
         "in_flight": len(job.get("in_flight") or {}),
-        "done": len(job.get("done") or {}),
+        "done": len(done_map),
         "failed": len(job.get("failed") or {}),
+        "updated": updated_cnt,
+        "skipped": skipped_cnt,
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
     }
@@ -916,6 +941,8 @@ def dashboard():
       <div><span class="pill">Pending</span> ${summary.pending}</div>
       <div><span class="pill">In-flight</span> ${summary.in_flight}</div>
       <div><span class="pill">Done</span> ${summary.done}</div>
+      <div><span class="pill">Updated</span> ${summary.updated ?? 0}</div>
+      <div><span class="pill">Skipped</span> ${summary.skipped ?? 0}</div>
       <div><span class="pill">Failed</span> ${summary.failed}</div>
     `;
   }
@@ -950,6 +977,8 @@ def dashboard():
         pending: (r.job.pending||[]).length,
         in_flight: Object.keys(r.job.in_flight||{}).length,
         done: Object.keys(r.job.done||{}).length,
+        updated: 0,
+        skipped: 0,
         failed: Object.keys(r.job.failed||{}).length,
       } : null);
       log(`Rollout started: ${currentRolloutJobId}`);
@@ -973,6 +1002,8 @@ def dashboard():
         pending: (r.job.pending||[]).length,
         in_flight: Object.keys(r.job.in_flight||{}).length,
         done: Object.keys(r.job.done||{}).length,
+        updated: 0,
+        skipped: 0,
         failed: Object.keys(r.job.failed||{}).length,
       } : null);
       log(`Rollout started: ${currentRolloutJobId}`);
