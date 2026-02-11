@@ -22,8 +22,6 @@ OTA_RELEASES = Path("/opt/hint/agent_releases")
 AGENT_CURRENT = Path("/opt/hint/agent_current")
 SETUP_RELEASES = Path("/opt/hint/device_setup_releases")
 SETUP_CURRENT = Path("/opt/hint/device_setup_current")
-OTA_TEST_FAIL = os.environ.get("HINT_OTA_TEST_FAIL", "").strip().lower() in ("1", "true", "yes")
-
 
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
@@ -118,9 +116,6 @@ def run(cmd: list[str]) -> None:
 
 
 def do_ota_update(prov: dict) -> dict:
-    if OTA_TEST_FAIL:
-        raise RuntimeError("OTA test failure (HINT_OTA_TEST_FAIL=1)")
-    
     ota = prov.get("ota")
     if not isinstance(ota, dict):
         raise RuntimeError("No OTA info in provision.json")
