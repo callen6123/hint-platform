@@ -756,6 +756,20 @@ def ui_rollout_status():
             elif rr == "skipped":
                 skipped_cnt += 1
 
+    # Build a compact failure summary for the UI (avoid dumping full job.failed)
+    failed_map = job.get("failed") or {}
+    failed_summary = []
+    if isinstance(failed_map, dict):
+        for _did, _ack in list(failed_map.items())[:20]:
+            item = {"device_id": _did}
+            if isinstance(_ack, dict):
+                item["error"] = _ack.get("error") or _ack.get("status")
+                item["command_id"] = _ack.get("command_id")
+                item["ts"] = _ack.get("ts")
+            else:
+                item["error"] = str(_ack)
+            failed_summary.append(item)
+
     summary = {
         "id": job.get("id"),
         "state": job.get("state"),
@@ -769,6 +783,7 @@ def ui_rollout_status():
         "in_flight": len(job.get("in_flight") or {}),
         "done": len(done_map),
         "failed": len(job.get("failed") or {}),
+        "failed_summary": failed_summary,
         "updated": updated_cnt,
         "skipped": skipped_cnt,
         "started_at": job.get("started_at"),
@@ -907,7 +922,7 @@ def dashboard():
       <label>Batch size: <input id="batchSize" type="number" min="1" max="50" value="5" /></label>
       <button id="rolloutUpdateAll">Staged Update All</button>
       <button id="rolloutBuildUpdateAll">Staged Build+Update All</button>
-      <button id="rolloutResume" disabled>Resume</button>
+      <button id="rolloutResume" disabled>Retry failed</button>
       <button id="rolloutCancel" disabled>Cancel</button>
       <span class="muted">Runs batches sequentially and tracks ACK completion.</span>
     </div>
@@ -1089,6 +1104,11 @@ def dashboard():
       <div><span class="pill">Updated</span> ${summary.updated ?? 0}</div>
       <div><span class="pill">Skipped</span> ${summary.skipped ?? 0}</div>
       <div><span class="pill">Failed</span> ${summary.failed}</div>
+      ${Array.isArray(summary.failed_summary) && summary.failed_summary.length ? `
+        <div style="flex-basis:100%"><span class="pill">Failure details</span>
+          <div class="muted" style="margin-top:4px; white-space:pre-wrap">${summary.failed_summary.map(x => `${x.device_id}: ${x.error || 'error'}`).join('\\n')}</div>
+        </div>
+      ` : ''}
       ${summary.state === 'halted' ? `<div><span class="pill">Reason</span> ${summary.halted_reason || ''}</div>` : ''}
       <div><span class="pill">Stop on failure</span> ${summary.stop_on_failure ? 'true' : 'false'}</div>
       <div><span class="pill">Max failures</span> ${summary.max_failures ?? 0}</div>
