@@ -445,7 +445,9 @@ def _start_hub_update_background() -> dict:
     # Preferred: a root-owned template unit that runs the update script.
     # This is more lock-down friendly than sudo systemd-run.
     if HUB_UPDATE_UNIT_TEMPLATE.exists():
-        _sudo_run(["systemctl", "start", f"hint-hub-update@{job_id}.service"])
+        # Use --no-block so we can return the HTTP response before the update job
+        # restarts this service.
+        _sudo_run(["systemctl", "start", "--no-block", f"hint-hub-update@{job_id}.service"])
         return {"ok": True, "job_id": job_id, "mode": "unit"}
 
     # Fallback: run the script in the background via systemd-run so it survives process restarts.
