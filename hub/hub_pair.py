@@ -149,7 +149,6 @@ def _advance_rollout(job: dict, reg: dict) -> None:
 
     if next_batch:
         write_registry(reg)
-        
     job["in_flight"] = inflight
     job["failed"] = failed
 
@@ -1200,11 +1199,11 @@ def dashboard():
           btn.disabled = true;
           if (action === 'update') {
             log(`Updating ${device}...`);
-            const r = await api('/ui/update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
+            const r = await api('/ui/update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
             log(`Update result: ${JSON.stringify(r)}`);
           } else {
             log(`Build+Update ${device}...`);
-            const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `ota-${device}-${Date.now()}` });
+            const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
             log(`Build+Update result: ${JSON.stringify(r)}`);
           }
           await refresh();
@@ -1360,7 +1359,7 @@ def dashboard():
   $(\"updateAll\").addEventListener('click', async () => {
     try {
       log('Update All...');
-      const r = await api('/ui/update', 'POST', { all: true, command_id: `ota-all-${Date.now()}` });
+      const r = await api('/ui/update', 'POST', { all: true, command_id: `cmd-all-${Date.now()}` });
       log(`Update All result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
@@ -1371,7 +1370,7 @@ def dashboard():
   $(\"buildUpdateAll\").addEventListener('click', async () => {
     try {
       log('Build+Update All...');
-      const r = await api('/ui/build-and-update', 'POST', { all: true, command_id: `ota-build-all-${Date.now()}` });
+      const r = await api('/ui/build-and-update', 'POST', { all: true, command_id: `cmd-build-all-${Date.now()}` });
       log(`Build+Update All result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
