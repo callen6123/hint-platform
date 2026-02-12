@@ -46,11 +46,33 @@ def _advance_rollout(job: dict, reg: dict) -> None:
     failed: dict = job.get("failed") or {}
 
     # Resolve in-flight devices
+    # ACK timeout
+    ack_timeout_sec = int(job.get("ack_timeout_sec") or 120)
+    ack_timeout_sec = max(5, min(ack_timeout_sec, 3600))
+    now_ts = time.time()
+
     resolved = []
-    for did, cid in inflight.items():
+    for did, v in list(inflight.items()):
+        cid = v.get("cid") if isinstance(v, dict) else v
+        sent_at = v.get("sent_at") if isinstance(v, dict) else None
+        sent_ts = float(sent_at) if isinstance(sent_at, (int, float)) else None
+
         rec = reg.get(did)
         if not isinstance(rec, dict):
             continue
+
+        # Timeout if no ACK within threshold
+        if sent_ts is not None and (now_ts - sent_ts) > ack_timeout_sec:
+            failed[did] = {
+                "status": "error",
+                "error": "ack_timeout",
+                "command_id": cid,
+                "details": {"timeout_sec": ack_timeout_sec},
+                "ts": int(now_ts),
+            }
+            resolved.append(did)
+            continue
+
         ack = _device_ack_for(rec, cid)
         if not ack:
             continue
@@ -120,7 +142,7 @@ def _advance_rollout(job: dict, reg: dict) -> None:
         cid = sanitize_topic_id(f"{job['id']}-{did}")
         try:
             publish_update(site_id, did, cid)
-            inflight[did] = cid
+            inflight[did] = {"cid": cid, "sent_at": time.time()}
         except Exception as e:
             failed[did] = {"status": "error", "error": str(e)}
 
@@ -656,6 +678,9 @@ def ui_rollout_start():
 
     build = bool(body.get("build"))
 
+    ack_timeout_sec = int(body.get("ack_timeout_sec") or 120)
+    ack_timeout_sec = max(5, min(ack_timeout_sec, 3600))
+
     # Safety controls
     stop_on_failure = bool(body.get("stop_on_failure", True))
     max_failures = int(body.get("max_failures") or 1)
@@ -680,6 +705,7 @@ def ui_rollout_start():
         "done": {},
         "failed": {},
         "started_at": utc_now_iso(),
+        "ack_timeout_sec": ack_timeout_sec,
         "stop_on_failure": stop_on_failure,
         "max_failures": max_failures,
         "halted_reason": None,
@@ -737,6 +763,7 @@ def ui_rollout_status():
         "stop_on_failure": bool(job.get("stop_on_failure")),
         "max_failures": int(job.get("max_failures") or 0),
         "batch_size": job.get("batch_size"),
+        "ack_timeout_sec": int(job.get("ack_timeout_sec") or 120),
         "targets_total": len(job.get("targets") or []),
         "pending": len(job.get("pending") or []),
         "in_flight": len(job.get("in_flight") or {}),
