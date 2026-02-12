@@ -142,10 +142,14 @@ def _advance_rollout(job: dict, reg: dict) -> None:
         cid = sanitize_topic_id(f"{job['id']}-{did}")
         try:
             publish_update(site_id, did, cid)
+            _mark_sent_in_registry(reg, did, cid, "update")
             inflight[did] = {"cid": cid, "sent_at": time.time()}
         except Exception as e:
             failed[did] = {"status": "error", "error": str(e)}
 
+    if next_batch:
+        write_registry(reg)
+        
     job["in_flight"] = inflight
     job["failed"] = failed
 
@@ -416,11 +420,66 @@ def mqtt_admin_cfg() -> tuple[str, int, str, str]:
     pw = os.environ.get("HUB_MQTT_PASS", "devpass123")
     return host, port, user, pw
 
+def make_command_payload(
+    command_id: str,
+    cmd: str,
+    params: dict | None = None,
+    ttl_sec: int | None = None,
+    priority: int | None = None,
+) -> dict:
+    """Command Schema v1."""
+    now = int(time.time())
+    ttl = int(ttl_sec if ttl_sec is not None else 300)
+    ttl = max(5, min(ttl, 3600))
+    pr = int(priority if priority is not None else 5)
+    pr = max(0, min(pr, 10))
 
-def publish_update(site_id: str, device_id: str, command_id: str) -> None:
+    return {
+        "schema": 1,
+        "command_id": sanitize_topic_id(command_id),
+        "cmd": str(cmd),
+        "params": params if isinstance(params, dict) else {},
+        "ttl_sec": ttl,
+        "priority": pr,
+        "issued_at": now,
+    }
+
+
+def _rec_recent_ids(rec: dict) -> list[str]:
+    v = rec.get("recent_command_ids")
+    if isinstance(v, list):
+        out: list[str] = []
+        for x in v:
+            xs = sanitize_topic_id(str(x))
+            if xs:
+                out.append(xs)
+        return out[:50]
+    return []
+
+
+def _mark_sent_in_registry(reg: dict, device_id: str, cmd_id: str, cmd: str) -> None:
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return
+
+    cmd_id = sanitize_topic_id(cmd_id)
+    if not cmd_id:
+        return
+
+    recent = _rec_recent_ids(rec)
+    if cmd_id in recent:
+        recent = [x for x in recent if x != cmd_id]
+    recent.append(cmd_id)
+    rec["recent_command_ids"] = recent[-20:]  # keep last 20
+
+    rec["last_sent_command_id"] = cmd_id
+    rec["last_sent_cmd"] = str(cmd)
+    rec["last_sent_at"] = utc_now_iso()
+
+
+def publish_command(site_id: str, device_id: str, payload: dict) -> None:
     host, port, user, pw = mqtt_admin_cfg()
     topic = f"site/{site_id}/device/{device_id}/cmd"
-    payload = json.dumps({"command_id": command_id, "cmd": "update"})
     subprocess.check_call(
         [
             "mosquitto_pub",
@@ -435,9 +494,13 @@ def publish_update(site_id: str, device_id: str, command_id: str) -> None:
             "-t",
             topic,
             "-m",
-            payload,
+            json.dumps(payload),
         ]
     )
+
+def publish_update(site_id: str, device_id: str, command_id: str) -> None:
+    payload = make_command_payload(command_id=command_id, cmd="update")
+    publish_command(site_id, device_id, payload)
 
 
 
@@ -463,7 +526,10 @@ def fleet_update():
 
     body = request.get_json(silent=True) or {}
 
-    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"cmd-{int(time.time())}")
 
     reg = read_registry()
     if not isinstance(reg, dict):
@@ -483,12 +549,27 @@ def fleet_update():
             continue
 
         site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+        recent = _rec_recent_ids(rec)
+        if command_id in recent:
+            skipped.append(did)
+            continue
+
         try:
-            publish_update(site_id, did, command_id)
+            payload = make_command_payload(
+                command_id=command_id,
+                cmd="update",
+                ttl_sec=ttl_sec,
+                priority=priority,
+            )
+            publish_command(site_id, did, payload)
+            _mark_sent_in_registry(reg, did, command_id, "update")
             sent.append(did)
         except Exception:
             skipped.append(did)
-
+   
+    if sent:
+        write_registry(reg)
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
 
@@ -518,6 +599,9 @@ def fleet_build_and_update():
 
     body = request.get_json(silent=True) or {}
 
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
     # Build OTA bundle first
     if not BUILD_OTA_SCRIPT.exists():
         return jsonify({"ok": False, "error": f"Missing build script: {BUILD_OTA_SCRIPT}"}), 500
@@ -537,7 +621,7 @@ def fleet_build_and_update():
     if err:
         return jsonify({"ok": False, "error": err}), 400
 
-    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+    command_id = sanitize_topic_id(body.get("command_id") or f"cmd-{int(time.time())}")
 
     sent: list[str] = []
     skipped: list[str] = []
@@ -549,11 +633,27 @@ def fleet_build_and_update():
             continue
 
         site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+        recent = _rec_recent_ids(rec)
+        if command_id in recent:
+            skipped.append(did)
+            continue
+
         try:
-            publish_update(site_id, did, command_id)
+            payload = make_command_payload(
+                command_id=command_id,
+                cmd="update",
+                ttl_sec=ttl_sec,
+                priority=priority,
+            )
+            publish_command(site_id, did, payload)
+            _mark_sent_in_registry(reg, did, command_id, "update")
             sent.append(did)
         except Exception:
             skipped.append(did)
+
+    if sent:
+        write_registry(reg)
 
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
@@ -588,6 +688,9 @@ def ui_update():
 
     body = request.get_json(silent=True) or {}
 
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
     reg = read_registry()
     if not isinstance(reg, dict):
         reg = {}
@@ -596,7 +699,7 @@ def ui_update():
     if err:
         return jsonify({"ok": False, "error": err}), 400
 
-    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+    command_id = sanitize_topic_id(body.get("command_id") or f"cmd-{int(time.time())}")
 
     sent: list[str] = []
     skipped: list[str] = []
@@ -608,11 +711,27 @@ def ui_update():
             continue
 
         site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+        recent = _rec_recent_ids(rec)
+        if command_id in recent:
+            skipped.append(did)
+            continue
+
         try:
-            publish_update(site_id, did, command_id)
+            payload = make_command_payload(
+                command_id=command_id,
+                cmd="update",
+                ttl_sec=ttl_sec,
+                priority=priority,
+            )
+            publish_command(site_id, did, payload)
+            _mark_sent_in_registry(reg, did, command_id, "update")
             sent.append(did)
         except Exception:
             skipped.append(did)
+
+    if sent:
+        write_registry(reg)
 
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
@@ -625,6 +744,9 @@ def ui_build_and_update():
         return ar
 
     body = request.get_json(silent=True) or {}
+
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
 
     if not BUILD_OTA_SCRIPT.exists():
         return jsonify({"ok": False, "error": f"Missing build script: {BUILD_OTA_SCRIPT}"}), 500
@@ -643,7 +765,7 @@ def ui_build_and_update():
     if err:
         return jsonify({"ok": False, "error": err}), 400
 
-    command_id = sanitize_topic_id(body.get("command_id") or f"ota-{int(time.time())}")
+    command_id = sanitize_topic_id(body.get("command_id") or f"cmd-{int(time.time())}")
 
     sent: list[str] = []
     skipped: list[str] = []
@@ -655,11 +777,27 @@ def ui_build_and_update():
             continue
 
         site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+        recent = _rec_recent_ids(rec)
+        if command_id in recent:
+            skipped.append(did)
+            continue
+
         try:
-            publish_update(site_id, did, command_id)
+            payload = make_command_payload(
+                command_id=command_id,
+                cmd="update",
+                ttl_sec=ttl_sec,
+                priority=priority,
+            )
+            publish_command(site_id, did, payload)
+            _mark_sent_in_registry(reg, did, command_id, "update")
             sent.append(did)
         except Exception:
             skipped.append(did)
+
+    if sent:
+        write_registry(reg)
 
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
