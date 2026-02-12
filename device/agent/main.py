@@ -16,6 +16,12 @@ PROVISION_PATH = Path("/etc/hint/provision.json")
 
 AUDIO_PATH = Path("/opt/hint/audio/demo.wav")
 
+# State publish behavior
+HEARTBEAT_SEC = int(os.environ.get("HINT_STATE_HEARTBEAT_SEC", "30"))
+HEARTBEAT_SEC = max(5, min(HEARTBEAT_SEC, 3600))
+STATE_DEBOUNCE_SEC = float(os.environ.get("HINT_STATE_DEBOUNCE_SEC", "1.0"))
+STATE_DEBOUNCE_SEC = max(0.0, min(STATE_DEBOUNCE_SEC, 10.0))
+
 # OTA paths
 OTA_STAGING = Path("/opt/hint/agent_staging")
 OTA_RELEASES = Path("/opt/hint/agent_releases")
@@ -213,6 +219,26 @@ def main() -> None:
 
     device_id = prov.get("device_id", socket.gethostname())
 
+    last_state: str | None = None
+    last_state_publish_ts: float = 0.0
+
+    def publish_state(status: str, *, force: bool = False) -> None:
+        nonlocal last_state, last_state_publish_ts
+        now = time.time()
+        if not force:
+            # If status is changing, allow immediate publish but debounce rapid flips.
+            if last_state != status and (now - last_state_publish_ts) < STATE_DEBOUNCE_SEC:
+                return
+            # If status is the same, avoid re-sending unless heartbeat loop calls with force.
+            if last_state == status:
+                return
+
+        payload = {"device_id": device_id, "status": status, "ts": int(now)}
+        payload.update(current_versions())
+        c.publish(state_t, json.dumps(payload), qos=1, retain=True)
+        last_state = status
+        last_state_publish_ts = now
+
     mqtt_cfg = prov["mqtt"]
     host = mqtt_cfg["host"]
     port = int(mqtt_cfg.get("port", 1883))
@@ -250,10 +276,8 @@ def main() -> None:
     def on_connect(client, userdata, flags, reason_code, properties=None):
         # Subscribe after connect so reconnects recover automatically
         client.subscribe(cmd_t, qos=1)
-        # Mark online
-        online_payload = {"device_id": device_id, "status": "ONLINE", "ts": int(time.time())}
-        online_payload.update(current_versions())
-        client.publish(state_t, json.dumps(online_payload), qos=1, retain=True)
+        # Mark online (retained)
+        publish_state("ONLINE", force=True)
 
     def on_message(client, userdata, msg):
         # Payload may be bytes; decode safely
@@ -273,9 +297,11 @@ def main() -> None:
             cmd = d.get("cmd")
 
             if cmd == "update":
+                publish_state("UPDATING")
                 res = do_ota_update(prov)
                 # completed with details, so hub can track progress
                 publish_ack(str(cid), "completed", res)
+                publish_state("IDLE")
 
                 # If we actually applied a new version, exit so systemd restarts on the new code.
                 if res.get("result") == "updated":
@@ -283,15 +309,20 @@ def main() -> None:
                     os._exit(0)
 
             elif cmd == "play":
+                publish_state("PLAYING")
                 play()
+                publish_state("IDLE")
                 publish_ack(str(cid), "completed")
 
             else:
                 # Back-compat: treat unknown command as play test
+                publish_state("PLAYING")
                 play()
+                publish_state("IDLE")
                 publish_ack(str(cid), "completed")
 
         except Exception as e:
+            publish_state("IDLE")
             publish_ack(str(cid), "error", {"error": str(e)})
 
     c.on_connect = on_connect
@@ -305,10 +336,14 @@ def main() -> None:
 
     # Heartbeat: keep a retained status so the hub can see liveness
     while True:
-        idle_payload = {"device_id": device_id, "status": "IDLE", "ts": int(time.time())}
-        idle_payload.update(current_versions())
-        c.publish(state_t, json.dumps(idle_payload), qos=1, retain=True)
-        time.sleep(5)
+        now = time.time()
+        payload = {"device_id": device_id, "status": last_state or "IDLE", "ts": int(now)}
+        payload.update(current_versions())
+        c.publish(state_t, json.dumps(payload), qos=1, retain=True)
+        last_state_publish_ts = now
+        if last_state is None:
+            last_state = "IDLE"
+        time.sleep(HEARTBEAT_SEC)
 
 
 if __name__ == "__main__":
