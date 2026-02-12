@@ -17,6 +17,9 @@ REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 OTA_DIR = Path("/opt/hint/ota")
 BUILD_OTA_SCRIPT = Path("/home/hub/hint-platform/hub/build_ota.py")
 
+HUB_REPO_DIR = Path("/home/hub/hint-platform")
+HUB_UPDATE_SCRIPT = Path("/opt/hint/hub/update_hub.sh")
+
 # In-memory rollout jobs (simple, single-hub process). For durability later, persist to REGISTRY_DIR.
 ROLLOUTS: dict[str, dict] = {}
 
@@ -419,6 +422,57 @@ def mqtt_admin_cfg() -> tuple[str, int, str, str]:
     pw = os.environ.get("HUB_MQTT_PASS", "devpass123")
     return host, port, user, pw
 
+
+# --- Hub update helpers ---
+
+def _sudo_run(cmd: list[str]) -> None:
+    subprocess.run(["sudo"] + cmd, check=True)
+
+
+def _start_hub_update_background() -> dict:
+    """Kick off a hub update in the background and return a small status object.
+
+    We must return BEFORE restarting hint-hub-pair or the HTTP request will get cut off.
+
+    Strategy:
+    - Prefer a root-owned script at /opt/hint/hub/update_hub.sh (created by you).
+    - Otherwise, use a shell one-liner.
+    """
+    job_id = sanitize_topic_id(f"hubupd-{int(time.time())}-{secrets.token_hex(3)}")
+
+    if HUB_UPDATE_SCRIPT.exists():
+        # Run the script in the background via systemd-run so it survives process restarts.
+        _sudo_run(
+            [
+                "systemd-run",
+                f"--unit={job_id}",
+                "--collect",
+                "--no-ask-password",
+                str(HUB_UPDATE_SCRIPT),
+            ]
+        )
+        return {"ok": True, "job_id": job_id, "mode": "script"}
+
+    # Fallback: systemd-run a shell command.
+    cmd = (
+        f"cd {str(HUB_REPO_DIR)} "
+        "&& git pull --ff-only "
+        "&& systemctl restart hint-device-watch "
+        "&& systemctl restart hint-hub-pair"
+    )
+    _sudo_run(
+        [
+            "systemd-run",
+            f"--unit={job_id}",
+            "--collect",
+            "--no-ask-password",
+            "/bin/bash",
+            "-lc",
+            cmd,
+        ]
+    )
+    return {"ok": True, "job_id": job_id, "mode": "inline"}
+
 def make_command_payload(
     command_id: str,
     cmd: str,
@@ -801,6 +855,23 @@ def ui_build_and_update():
     return jsonify({"ok": True, "command_id": command_id, "sent": sent, "skipped": skipped})
 
 
+
+
+# --- UI hub update endpoint ---
+
+@app.post("/ui/hub/update")
+def ui_hub_update():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    try:
+        info = _start_hub_update_background()
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # --- UI staged rollout endpoints ---
 
 @app.post("/ui/rollout/start")
@@ -1048,6 +1119,7 @@ def dashboard():
     </div>
     <div class=\"controls right\">
       <button id=\"refresh\">Refresh</button>
+      <button id=\"hubUpdate\">Update Hub</button>
       <button id=\"updateAll\">Update All</button>
       <button id=\"buildUpdateAll\">Build+Update All</button>
     </div>
@@ -1355,6 +1427,17 @@ def dashboard():
   });
 
   $(\"refresh\").addEventListener('click', refresh);
+
+  $("hubUpdate").addEventListener('click', async () => {
+    try {
+      log('Starting hub update (git pull + restart services)...');
+      const r = await api('/ui/hub/update', 'POST', {});
+      log(`Hub update triggered: ${JSON.stringify(r)}`);
+      log('If hub services restart, the page may briefly fail to refresh; wait a few seconds then refresh.');
+    } catch (e) {
+      log(`Hub update failed: ${e.message}`);
+    }
+  });
 
   $(\"updateAll\").addEventListener('click', async () => {
     try {
