@@ -19,6 +19,7 @@ BUILD_OTA_SCRIPT = Path("/home/hub/hint-platform/hub/build_ota.py")
 
 HUB_REPO_DIR = Path("/home/hub/hint-platform")
 HUB_UPDATE_SCRIPT = Path("/opt/hint/hub/update_hub.sh")
+HUB_UPDATE_UNIT_TEMPLATE = Path("/etc/systemd/system/hint-hub-update@.service")
 
 # In-memory rollout jobs (simple, single-hub process). For durability later, persist to REGISTRY_DIR.
 ROLLOUTS: dict[str, dict] = {}
@@ -435,13 +436,20 @@ def _start_hub_update_background() -> dict:
     We must return BEFORE restarting hint-hub-pair or the HTTP request will get cut off.
 
     Strategy:
-    - Prefer a root-owned script at /opt/hint/hub/update_hub.sh (created by you).
+    - Prefer a root-owned template unit at /etc/systemd/system/hint-hub-update@.service.
+    - Otherwise, use a root-owned script at /opt/hint/hub/update_hub.sh.
     - Otherwise, use a shell one-liner.
     """
     job_id = sanitize_topic_id(f"hubupd-{int(time.time())}-{secrets.token_hex(3)}")
 
+    # Preferred: a root-owned template unit that runs the update script.
+    # This is more lock-down friendly than sudo systemd-run.
+    if HUB_UPDATE_UNIT_TEMPLATE.exists():
+        _sudo_run(["systemctl", "start", f"hint-hub-update@{job_id}.service"])
+        return {"ok": True, "job_id": job_id, "mode": "unit"}
+
+    # Fallback: run the script in the background via systemd-run so it survives process restarts.
     if HUB_UPDATE_SCRIPT.exists():
-        # Run the script in the background via systemd-run so it survives process restarts.
         _sudo_run(
             [
                 "systemd-run",
