@@ -24,6 +24,16 @@ HUB_UPDATE_UNIT_TEMPLATE = Path("/etc/systemd/system/hint-hub-update@.service")
 # In-memory rollout jobs (simple, single-hub process). For durability later, persist to REGISTRY_DIR.
 ROLLOUTS: dict[str, dict] = {}
 
+# Hub update check cache (avoid running git fetch on every /ui/status refresh)
+_HUB_UPDATE_CACHE: dict = {
+    "checked_at_ts": 0.0,
+    "ttl_sec": 12 * 60 * 60,  # 12 hours
+    "hub_version": None,
+    "hub_latest_version": None,
+    "hub_update_available": None,
+    "error": None,
+}
+
 
 def _rollout_new_id() -> str:
     return sanitize_topic_id(f"roll-{int(time.time())}-{secrets.token_hex(4)}")
@@ -424,6 +434,95 @@ def mqtt_admin_cfg() -> tuple[str, int, str, str]:
     return host, port, user, pw
 
 
+# --- OTA/hub update helpers ---
+
+def _read_ota_latest_version() -> str | None:
+    """Return the OTA bundle version from /opt/hint/ota/latest.json (short git sha), or None."""
+    p = OTA_DIR / "latest.json"
+    if not p.exists():
+        return None
+    try:
+        txt = p.read_text(encoding="utf-8").strip()
+        if not txt:
+            return None
+        d = json.loads(txt)
+        if isinstance(d, dict):
+            v = d.get("version")
+            if v:
+                return sanitize_topic_id(str(v))
+    except Exception:
+        return None
+    return None
+
+
+def _git_run(args: list[str], cwd: Path) -> str:
+    res = subprocess.run(
+        args,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+    )
+    return res.stdout.strip()
+
+
+def _hub_update_status_cached(force: bool = False) -> dict:
+    """Check if hub has updates available (origin/main differs from HEAD) with caching."""
+    now = time.time()
+    ttl = float(_HUB_UPDATE_CACHE.get("ttl_sec") or 0)
+    last = float(_HUB_UPDATE_CACHE.get("checked_at_ts") or 0)
+
+    if (not force) and ttl > 0 and (now - last) < ttl:
+        return {
+            "hub_version": _HUB_UPDATE_CACHE.get("hub_version"),
+            "hub_latest_version": _HUB_UPDATE_CACHE.get("hub_latest_version"),
+            "hub_update_available": _HUB_UPDATE_CACHE.get("hub_update_available"),
+            "hub_update_error": _HUB_UPDATE_CACHE.get("error"),
+            "hub_checked_at": datetime.fromtimestamp(last, tz=timezone.utc).isoformat() if last else None,
+        }
+
+    out = {
+        "hub_version": None,
+        "hub_latest_version": None,
+        "hub_update_available": None,
+        "hub_update_error": None,
+        "hub_checked_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+    }
+
+    try:
+        # Current commit
+        head = _git_run(["git", "rev-parse", "--short", "HEAD"], HUB_REPO_DIR)
+        head = sanitize_topic_id(head)
+        out["hub_version"] = head
+
+        # Refresh remote refs (this is why we cache)
+        _git_run(["git", "fetch", "--quiet", "origin"], HUB_REPO_DIR)
+
+        # Remote main commit
+        remote = _git_run(["git", "rev-parse", "--short", "origin/main"], HUB_REPO_DIR)
+        remote = sanitize_topic_id(remote)
+        out["hub_latest_version"] = remote
+
+        if head and remote:
+            out["hub_update_available"] = (head != remote)
+        else:
+            out["hub_update_available"] = None
+
+    except Exception as e:
+        out["hub_update_error"] = str(e)
+        out["hub_update_available"] = None
+
+    # Update cache
+    _HUB_UPDATE_CACHE["checked_at_ts"] = now
+    _HUB_UPDATE_CACHE["hub_version"] = out.get("hub_version")
+    _HUB_UPDATE_CACHE["hub_latest_version"] = out.get("hub_latest_version")
+    _HUB_UPDATE_CACHE["hub_update_available"] = out.get("hub_update_available")
+    _HUB_UPDATE_CACHE["error"] = out.get("hub_update_error")
+
+    return out
+
+
 # --- Hub update helpers ---
 
 def _sudo_run(cmd: list[str]) -> None:
@@ -740,7 +839,19 @@ def ui_status():
             devices.append(rec)
 
     devices.sort(key=lambda r: str(r.get("device_id", "")))
-    return jsonify({"ok": True, "devices": devices})
+    ota_latest = _read_ota_latest_version()
+    hub_status = _hub_update_status_cached(force=False)
+
+    return jsonify({
+        "ok": True,
+        "devices": devices,
+        "ota_latest_version": ota_latest,
+        "hub_version": hub_status.get("hub_version"),
+        "hub_latest_version": hub_status.get("hub_latest_version"),
+        "hub_update_available": hub_status.get("hub_update_available"),
+        "hub_checked_at": hub_status.get("hub_checked_at"),
+        "hub_update_error": hub_status.get("hub_update_error"),
+    })
 
 
 @app.post("/ui/update")
@@ -1135,6 +1246,8 @@ def dashboard():
     </div>
   </header>
 
+  <div id="banner" class="panel" style="display:none;"></div>
+
     <div class="panel">
     <h3>Staged Rollout</h3>
     <div class="controls">
@@ -1228,18 +1341,63 @@ def dashboard():
     return r;
   }
 
+  function renderBanner(info){
+    const b = $("banner");
+    if (!b) return;
+    if (!info) {
+      b.style.display = 'none';
+      b.innerHTML = '';
+      return;
+    }
+
+    const parts = [];
+    if (info.otaLatest) {
+      parts.push(`<div><b>Device OTA:</b> latest <span class="pill">${info.otaLatest}</span></div>`);
+    } else {
+      parts.push(`<div><b>Device OTA:</b> <span class="muted">no bundle built yet</span></div>`);
+    }
+
+    if (info.hubVer) {
+      const hv = `<span class="pill">${info.hubVer}</span>`;
+      if (info.hubUpd === true) {
+        const hl = info.hubLatest ? `<span class="pill">${info.hubLatest}</span>` : `<span class="muted">(unknown)</span>`;
+        parts.push(`<div><b>Hub:</b> ${hv} → ${hl} <span class="muted">(update available)</span></div>`);
+      } else if (info.hubUpd === false) {
+        parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(up to date)</span></div>`);
+      } else {
+        parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(update status unknown)</span></div>`);
+      }
+    } else {
+      parts.push(`<div><b>Hub:</b> <span class="muted">version unknown</span></div>`);
+    }
+
+    if (info.hubErr) {
+      parts.push(`<div class="muted">Hub update check error: ${String(info.hubErr)}</div>`);
+    }
+
+    b.innerHTML = `<h3 style="margin:0 0 8px 0; font-size:14px;">Updates</h3>` + parts.join('');
+    b.style.display = '';
+  }
+
   async function refresh(){
     try {
       const data = await api('/ui/status', 'GET');
       const devices = data.devices || [];
-      render(devices);
+      const otaLatest = data.ota_latest_version || null;
+      const hubVer = data.hub_version || null;
+      const hubLatest = data.hub_latest_version || null;
+      const hubUpd = (typeof data.hub_update_available === 'boolean') ? data.hub_update_available : null;
+      const hubErr = data.hub_update_error || null;
+      renderBanner({ otaLatest, hubVer, hubLatest, hubUpd, hubErr });
+      render(devices, otaLatest);
     } catch (e) {
+      renderBanner(null);
       render([]);
       log(`Refresh failed: ${e.message}`);
     }
   }
 
-  function render(devices){
+  function render(devices, otaLatest){
     const tbody = $(\"tbody\");
     if (!devices.length){
       tbody.innerHTML = `<tr><td colspan=\"8\" class=\"muted\">No devices.</td></tr>`;
@@ -1250,8 +1408,11 @@ def dashboard():
       const did = fmt(d.device_id);
       const st = fmt(d.status || 'unknown');
       const ls = fmt(d.last_seen || '');
-      const av = fmt(d.agent_version || '(unknown)');
-      const sv = fmt(d.setup_version || '(unknown)');
+      const avRaw = fmt(d.agent_version || '(unknown)');
+      const svRaw = fmt(d.setup_version || '(unknown)');
+      const needsUpdate = otaLatest && avRaw && (avRaw !== '(unknown)') && (avRaw !== String(otaLatest));
+      const av = needsUpdate ? `${avRaw} → ${otaLatest}` : avRaw;
+      const sv = svRaw;
       const lc = lastCmd(d);
       const lr = lastResult(d);
       return `
@@ -1259,7 +1420,7 @@ def dashboard():
           <td><span class=\"pill\">${did}</span></td>
           <td class=\"${statusClass(st)}\">${st}</td>
           <td class=\"muted\">${ls}</td>
-          <td>${av}</td>
+          <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
           <td>${sv}</td>
           <td class=\"muted\">${lc}</td>
           <td class=\"muted\">${lr}</td>
