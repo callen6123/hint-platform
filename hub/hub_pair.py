@@ -1092,6 +1092,7 @@ def dashboard():
       ${summary.state === 'halted' ? `<div><span class="pill">Reason</span> ${summary.halted_reason || ''}</div>` : ''}
       <div><span class="pill">Stop on failure</span> ${summary.stop_on_failure ? 'true' : 'false'}</div>
       <div><span class="pill">Max failures</span> ${summary.max_failures ?? 0}</div>
+      <div><span class="pill">ACK timeout</span> ${(summary.ack_timeout_sec ?? 120)}s</div>
     `;
     const resumeBtn = $("rolloutResume");
     const cancelBtn = $("rolloutCancel");
@@ -1135,6 +1136,9 @@ def dashboard():
         updated: 0,
         skipped: 0,
         failed: Object.keys(r.job.failed||{}).length,
+        ack_timeout_sec: (r.job.ack_timeout_sec ?? 120),
+        stop_on_failure: (r.job.stop_on_failure ?? true),
+        max_failures: (r.job.max_failures ?? 1),
       } : null);
       log(`Rollout started: ${currentRolloutJobId}`);
       await rolloutStatusTick();
@@ -1160,6 +1164,9 @@ def dashboard():
         updated: 0,
         skipped: 0,
         failed: Object.keys(r.job.failed||{}).length,
+        ack_timeout_sec: (r.job.ack_timeout_sec ?? 120),
+        stop_on_failure: (r.job.stop_on_failure ?? true),
+        max_failures: (r.job.max_failures ?? 1),
       } : null);
       log(`Rollout started: ${currentRolloutJobId}`);
       await rolloutStatusTick();
