@@ -8,7 +8,29 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Local hub modules (these live next to this file inside the repo)
+# audio_server.py: stores/serves generated audio with per-device token auth
+# tts.py: ElevenLabs client wrapper (implemented separately)
+try:
+    from audio_server import bp as audio_bp, store_audio, build_audio_url
+except Exception:
+    audio_bp = None
+    store_audio = None
+    build_audio_url = None
+
+try:
+    import tts
+except Exception:
+    tts = None
+
 app = Flask(__name__)
+
+# Register audio blueprint if available
+if audio_bp is not None:
+    app.register_blueprint(audio_bp)
+
+# Base URL devices should use to fetch hub-hosted artifacts (OTA + audio)
+HUB_BASE_URL = os.environ.get("HUB_BASE_URL", "http://hinthub.local:5000")
 
 PAIR_CODE = "483921"  # you will type this into the device setup page
 
@@ -821,7 +843,106 @@ def fleet_build_and_update():
 
 
 #
+#
 # UI proxy endpoints (same-origin). No API key required from the browser.
+
+
+# --- UI TTS speak endpoint ---
+
+@app.post("/ui/speak")
+def ui_speak():
+    """Generate speech on the hub, store it, and command one device to play it.
+
+    Body:
+      {"device_id": "...", "text": "...", "command_id": "optional", "ttl_sec": 300, "priority": 5,
+       "tts": {"voice_id": "...", "model": "...", "stability": 0.5, "similarity_boost": 0.5}}
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    text = str(body.get("text") or "").strip()
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+    if not text:
+        return jsonify({"ok": False, "error": "text_required"}), 400
+
+    if tts is None or not hasattr(tts, "synthesize"):
+        return jsonify({"ok": False, "error": "tts_not_configured"}), 500
+    if store_audio is None or build_audio_url is None:
+        return jsonify({"ok": False, "error": "audio_server_not_configured"}), 500
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    ota_token = str(rec.get("ota_token") or "")
+    if not ota_token:
+        return jsonify({"ok": False, "error": "missing_ota_token"}), 500
+
+    # Optional TTS options
+    tts_opts = body.get("tts") if isinstance(body.get("tts"), dict) else {}
+
+    # Synthesize audio bytes on hub
+    try:
+        audio_bytes, ext = tts.synthesize(text=text, **tts_opts)
+    except TypeError:
+        # Back-compat if synthesize() doesn't accept kwargs yet
+        audio_bytes, ext = tts.synthesize(text=text)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"tts_failed:{e}"}), 500
+
+    if not isinstance(audio_bytes, (bytes, bytearray)) or len(audio_bytes) == 0:
+        return jsonify({"ok": False, "error": "tts_empty_audio"}), 500
+    ext = str(ext or "mp3").lstrip(".")
+
+    try:
+        audio_id = store_audio(bytes(audio_bytes), ext=ext)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"audio_store_failed:{e}"}), 500
+
+    try:
+        url = build_audio_url(base_url=HUB_BASE_URL, audio_id=audio_id, device_id=device_id, token=ota_token)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"audio_url_failed:{e}"}), 500
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"speak-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="speak",
+        params={
+            "url": url,
+            "audio_id": audio_id,
+            "text": text,
+            "ext": ext,
+        },
+        ttl_sec=ttl_sec if ttl_sec is not None else 300,
+        priority=priority if priority is not None else 5,
+    )
+
+    try:
+        publish_command(site_id, device_id, payload)
+        _mark_sent_in_registry(reg, device_id, command_id, "speak")
+        write_registry(reg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "device_id": device_id,
+        "command_id": command_id,
+        "audio_id": audio_id,
+        "url": url,
+    })
 
 @app.get("/ui/status")
 def ui_status():
