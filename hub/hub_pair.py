@@ -8,6 +8,8 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import urllib.request
+import urllib.error
 
 # Ensure repo root is on sys.path even when this file is executed as a script
 # (e.g. ExecStart=/usr/bin/python3 /home/hub/hint-platform/hub/hub_pair.py)
@@ -71,6 +73,99 @@ _HUB_UPDATE_CACHE: dict = {
     "hub_update_available": None,
     "error": None,
 }
+
+# ElevenLabs voices cache (avoid hitting API on every page load)
+_VOICES_CACHE: dict = {
+    "checked_at_ts": 0.0,
+    "ttl_sec": 6 * 60 * 60,  # 6 hours
+    "voices": None,          # list[dict]
+    "error": None,
+}
+
+def _get_elevenlabs_voices_cached(force: bool = False) -> dict:
+    """Return {ok, voices:[{voice_id,name,category,labels}], error, checked_at}."""
+    now = time.time()
+    ttl = float(_VOICES_CACHE.get("ttl_sec") or 0)
+    last = float(_VOICES_CACHE.get("checked_at_ts") or 0)
+
+    if (not force) and ttl > 0 and (now - last) < ttl and _VOICES_CACHE.get("voices") is not None:
+        return {
+            "ok": True,
+            "voices": _VOICES_CACHE.get("voices") or [],
+            "error": _VOICES_CACHE.get("error"),
+            "checked_at": datetime.fromtimestamp(last, tz=timezone.utc).isoformat() if last else None,
+        }
+
+    api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    if not api_key:
+        _VOICES_CACHE["checked_at_ts"] = now
+        _VOICES_CACHE["voices"] = []
+        _VOICES_CACHE["error"] = "missing_ELEVENLABS_API_KEY"
+        return {
+            "ok": False,
+            "voices": [],
+            "error": "missing_ELEVENLABS_API_KEY",
+            "checked_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        }
+
+    url = "https://api.elevenlabs.io/v1/voices"
+    req = urllib.request.Request(url, headers={"xi-api-key": api_key, "Accept": "application/json"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        payload = json.loads(raw) if raw else {}
+        voices = payload.get("voices") if isinstance(payload, dict) else None
+        out_list: list[dict] = []
+        if isinstance(voices, list):
+            for v in voices:
+                if not isinstance(v, dict):
+                    continue
+                vid = str(v.get("voice_id") or "").strip()
+                name = str(v.get("name") or "").strip()
+                if not vid or not name:
+                    continue
+                out_list.append({
+                    "voice_id": vid,
+                    "name": name,
+                    "category": v.get("category"),
+                    "labels": v.get("labels") if isinstance(v.get("labels"), dict) else {},
+                })
+
+        # Sort by name for UI
+        out_list.sort(key=lambda x: (str(x.get("name") or "").lower(), str(x.get("voice_id") or "")))
+
+        _VOICES_CACHE["checked_at_ts"] = now
+        _VOICES_CACHE["voices"] = out_list
+        _VOICES_CACHE["error"] = None
+
+        return {
+            "ok": True,
+            "voices": out_list,
+            "error": None,
+            "checked_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        }
+
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        _VOICES_CACHE["checked_at_ts"] = now
+        _VOICES_CACHE["voices"] = []
+        _VOICES_CACHE["error"] = str(e)
+        return {
+            "ok": False,
+            "voices": [],
+            "error": str(e),
+            "checked_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        _VOICES_CACHE["checked_at_ts"] = now
+        _VOICES_CACHE["voices"] = []
+        _VOICES_CACHE["error"] = str(e)
+        return {
+            "ok": False,
+            "voices": [],
+            "error": str(e),
+            "checked_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        }
 
 
 def _rollout_new_id() -> str:
@@ -863,6 +958,21 @@ def fleet_build_and_update():
 # UI proxy endpoints (same-origin). No API key required from the browser.
 
 
+@app.get("/ui/voices")
+def ui_voices():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    force = bool(request.args.get("force"))
+    info = _get_elevenlabs_voices_cached(force=force)
+    return jsonify({
+        "ok": bool(info.get("ok")),
+        "voices": info.get("voices") or [],
+        "checked_at": info.get("checked_at"),
+        "error": info.get("error"),
+    })
+
 # --- UI TTS speak endpoint ---
 
 @app.post("/ui/speak")
@@ -1424,6 +1534,209 @@ def ui_rollout_cancel():
     return jsonify({"ok": True, "job": job})
 
 
+@app.get("/speak")
+def speak_page():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    html = """<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Hint Hub - Speak</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+    header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    nav a { margin-right: 10px; text-decoration: none; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
+    .panel { margin-top: 14px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
+    label { display:block; margin: 10px 0 6px; font-weight: 600; }
+    select, textarea, input[type=text] { width: 100%; max-width: 860px; padding: 8px; font-size: 14px; }
+    textarea { height: 120px; }
+    button { padding: 8px 12px; cursor: pointer; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .muted { color:#666; }
+    .log { margin-top: 12px; padding: 10px; background: #111; color: #eee; border-radius: 6px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class=\"row\">
+      <span class=\"pill\">Hint Hub</span>
+      <nav>
+        <a href=\"/speak\"><b>Speak</b></a>
+        <a href=\"/dashboard\">Updates</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class=\"panel\">
+    <div class=\"row\">
+      <div>
+        <label for=\"device\">Device</label>
+        <select id=\"device\"></select>
+        <div class=\"muted\" id=\"deviceHint\"></div>
+      </div>
+      <div>
+        <label for=\"voice\">Voice</label>
+        <select id=\"voice\"></select>
+        <div class=\"muted\" id=\"voiceHint\"></div>
+      </div>
+    </div>
+
+    <label for=\"text\">Message</label>
+    <textarea id=\"text\" placeholder=\"Type what you want the character to say…\"></textarea>
+
+    <div class=\"row\" style=\"margin-top:10px;\">
+      <button id=\"speakBtn\">Generate + Play</button>
+      <button id=\"refreshBtn\">Refresh devices/voices</button>
+      <span class=\"muted\" id=\"status\"></span>
+    </div>
+  </div>
+
+  <div class=\"log\" id=\"log\"></div>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+
+  function log(msg){
+    const ts = new Date().toISOString();
+    logEl.textContent += `[${ts}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  async function api(path, method, body){
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(path, opts);
+    const txt = await res.text();
+    let data;
+    try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
+    return data;
+  }
+
+  function setStatus(s){
+    $("status").textContent = s || '';
+  }
+
+  function savePrefs(){
+    try {
+      localStorage.setItem('hint_voice_id', $("voice").value || '');
+      localStorage.setItem('hint_device_id', $("device").value || '');
+    } catch {}
+  }
+
+  function loadPrefs(){
+    try {
+      return {
+        voice_id: localStorage.getItem('hint_voice_id') || '',
+        device_id: localStorage.getItem('hint_device_id') || '',
+      };
+    } catch {
+      return { voice_id:'', device_id:'' };
+    }
+  }
+
+  async function loadDevices(){
+    const data = await api('/ui/status', 'GET');
+    const devices = (data.devices || []).filter(d => d && d.device_id);
+    const sel = $("device");
+    sel.innerHTML = '';
+    devices.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.device_id;
+      const st = d.status || 'unknown';
+      opt.textContent = `${d.device_id} (${st})`;
+      sel.appendChild(opt);
+    });
+    $("deviceHint").textContent = devices.length ? '' : 'No devices paired yet.';
+    return devices;
+  }
+
+  async function loadVoices(force){
+    const qs = force ? '?force=1' : '';
+    const data = await api('/ui/voices' + qs, 'GET');
+    const voices = (data.voices || []).filter(v => v && v.voice_id && v.name);
+    const sel = $("voice");
+    sel.innerHTML = '';
+    voices.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.voice_id;
+      opt.textContent = v.name;
+      sel.appendChild(opt);
+    });
+    const checkedAt = data.checked_at ? ` (cached: ${data.checked_at})` : '';
+    $("voiceHint").textContent = voices.length ? `Loaded ${voices.length} voice(s)${checkedAt}` : `No voices returned${checkedAt}`;
+    return voices;
+  }
+
+  async function refreshAll(forceVoices){
+    setStatus('Loading…');
+    const prefs = loadPrefs();
+    const devices = await loadDevices();
+    const voices = await loadVoices(!!forceVoices);
+
+    if (prefs.device_id) {
+      $("device").value = prefs.device_id;
+    }
+    if (prefs.voice_id) {
+      $("voice").value = prefs.voice_id;
+    }
+
+    // If pref not present or invalid, just keep first option.
+    savePrefs();
+    setStatus('Ready');
+    log(`Loaded devices=${devices.length}, voices=${voices.length}`);
+  }
+
+  $("device").addEventListener('change', savePrefs);
+  $("voice").addEventListener('change', savePrefs);
+
+  $("refreshBtn").addEventListener('click', async () => {
+    try {
+      await refreshAll(true);
+    } catch(e){
+      setStatus('Error');
+      log(`Refresh failed: ${e.message}`);
+    }
+  });
+
+  $("speakBtn").addEventListener('click', async () => {
+    const device_id = $("device").value || '';
+    const voice_id = $("voice").value || '';
+    const text = ($("text").value || '').trim();
+    if (!device_id) { log('Pick a device first.'); return; }
+    if (!voice_id) { log('Pick a voice first.'); return; }
+    if (!text) { log('Type a message first.'); return; }
+
+    try {
+      $("speakBtn").disabled = true;
+      setStatus('Generating…');
+      log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
+      const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
+      log(`Queued: ${JSON.stringify(r)}`);
+      setStatus('Sent');
+    } catch(e){
+      setStatus('Error');
+      log(`Speak failed: ${e.message}`);
+    } finally {
+      $("speakBtn").disabled = false;
+    }
+  });
+
+  refreshAll(false).catch(e => log(`Init failed: ${e.message}`));
+})();
+</script>
+</body>
+</html>"""
+
+    return html
+
 # Dashboard HTML shell route
 @app.get("/dashboard")
 def dashboard():
@@ -1464,6 +1777,7 @@ def dashboard():
   <header>
     <div class=\"controls\">
       <span class=\"pill\">Hint Hub Dashboard</span>
+      <a href=\"/speak\" class=\"muted\" style=\"text-decoration:none;\">Speak</a>
       <span class=\"muted\">Auto-refresh: 5s</span>
     </div>
     <div class=\"controls right\">
