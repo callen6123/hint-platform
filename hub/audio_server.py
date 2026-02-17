@@ -11,7 +11,8 @@ from typing import Any
 from flask import Blueprint, Response, abort, jsonify, request, send_file
 
 
-AUDIO_DIR = Path("/opt/hint/audio_cache")
+ # Allow override via environment variable (set by systemd)
+AUDIO_DIR = Path(os.environ.get("HINT_AUDIO_CACHE_DIR", "/opt/hint/audio_cache"))
 DEVICES_DB = Path("/var/lib/hint/devices.json")
 
 
