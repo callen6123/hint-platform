@@ -14,7 +14,15 @@ import paho.mqtt.client as mqtt
 
 PROVISION_PATH = Path("/etc/hint/provision.json")
 
+
 AUDIO_PATH = Path("/opt/hint/audio/demo.wav")
+
+# Audio cache and speak config
+AUDIO_CACHE_DIR = Path(os.environ.get("HINT_AUDIO_CACHE_DIR", "/opt/hint/audio_cache"))
+AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+SPEAK_DOWNLOAD_TIMEOUT = int(os.environ.get("HINT_SPEAK_DOWNLOAD_TIMEOUT_SEC", "30"))
+SPEAK_MAX_BYTES = int(os.environ.get("HINT_SPEAK_MAX_BYTES", str(10 * 1024 * 1024)))  # 10MB
 
 # State publish behavior
 HEARTBEAT_SEC = int(os.environ.get("HINT_STATE_HEARTBEAT_SEC", "30"))
@@ -77,23 +85,25 @@ def _find_usb_card() -> str | None:
                     return cardid
     return None
 
-
-def play() -> None:
-    if not AUDIO_PATH.exists():
-        print(f"[AUDIO] missing file: {AUDIO_PATH}")
-        return
-
+def _aplay_cmd_for(path: Path) -> list[str]:
     card = _find_usb_card()
     if card:
-        cmd = ["aplay", "-D", f"hw:{card},0", str(AUDIO_PATH)]
-    else:
-        cmd = ["aplay", str(AUDIO_PATH)]
+        return ["aplay", "-D", f"hw:{card},0", str(path)]
+    return ["aplay", str(path)]
+
+
+def play_file(path: Path) -> None:
+    if not path.exists():
+        print(f"[AUDIO] missing file: {path}")
+        return
+
+    cmd = _aplay_cmd_for(path)
 
     # Retry a few times to handle USB “not ready” moments
     for attempt in range(1, 6):
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0:
-            print(f"[AUDIO] played {AUDIO_PATH} via {cmd}")
+            print(f"[AUDIO] played {path} via {cmd}")
             return
 
         err = (res.stderr or "").strip()
@@ -107,6 +117,10 @@ def play() -> None:
         time.sleep(0.5)
 
     print("[AUDIO] giving up after retries")
+
+
+def play() -> None:
+    play_file(AUDIO_PATH)
 
 
 def sha256_file(p: Path) -> str:
@@ -209,6 +223,43 @@ def do_ota_update(prov: dict) -> dict:
         "to_version": ver,
     }
 
+def download_speak_audio(url: str, *, audio_id: str | None = None) -> Path:
+    AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Choose filename
+    safe_id = (audio_id or f"speak-{int(time.time())}").replace("/", "_").replace("..", "_")
+    # Default extension; we may replace based on headers later if needed
+    out_path = AUDIO_CACHE_DIR / f"{safe_id}.wav"
+
+    req = urllib.request.Request(url, headers={"User-Agent": "hint-agent/1"})
+    with urllib.request.urlopen(req, timeout=SPEAK_DOWNLOAD_TIMEOUT) as r:
+        # Basic size guard
+        clen = r.headers.get("Content-Length")
+        if clen is not None:
+            try:
+                if int(clen) > SPEAK_MAX_BYTES:
+                    raise RuntimeError(f"audio_too_large: {clen} bytes")
+            except ValueError:
+                pass
+
+        # Stream to temp then atomic move
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        total = 0
+        with tmp.open("wb") as f:
+            while True:
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > SPEAK_MAX_BYTES:
+                    f.close()
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError(f"audio_too_large: exceeded {SPEAK_MAX_BYTES} bytes")
+                f.write(chunk)
+
+        tmp.replace(out_path)
+
+    return out_path
 
 def main() -> None:
     prov = load_provision()
@@ -310,14 +361,31 @@ def main() -> None:
 
             elif cmd == "play":
                 publish_state("PLAYING")
-                play()
+                play_file(AUDIO_PATH)
                 publish_state("IDLE")
                 publish_ack(str(cid), "completed")
+
+            elif cmd == "speak":
+                params = d.get("params")
+                if not isinstance(params, dict):
+                    params = {}
+
+                url = params.get("url") or d.get("url")
+                audio_id = params.get("audio_id") or d.get("audio_id")
+
+                if not url or not isinstance(url, str):
+                    raise RuntimeError("missing_speak_url")
+
+                publish_state("PLAYING")
+                local_path = download_speak_audio(url, audio_id=str(audio_id) if audio_id else None)
+                play_file(local_path)
+                publish_state("IDLE")
+                publish_ack(str(cid), "completed", {"audio_id": audio_id, "file": str(local_path)})
 
             else:
                 # Back-compat: treat unknown command as play test
                 publish_state("PLAYING")
-                play()
+                play_file(AUDIO_PATH)
                 publish_state("IDLE")
                 publish_ack(str(cid), "completed")
 
