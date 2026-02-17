@@ -11,6 +11,7 @@ import urllib.request
 import urllib.error
 
 
+# Manufacturing fallback. Preferred source is ELEVENLABS_API_KEY from hub.env.
 SECRET_KEY_PATH = Path("/etc/hint/secrets/elevenlabs_api_key")
 
 
@@ -28,25 +29,30 @@ class ElevenLabsError(RuntimeError):
 
 
 def _read_api_key() -> str:
-    """Read the ElevenLabs API key from the manufacturing secret file."""
+    """Read the ElevenLabs API key.
+
+    Preferred: ELEVENLABS_API_KEY environment variable (e.g. from /etc/hint/hub.env)
+    Fallback: manufacturing secret file at SECRET_KEY_PATH.
+    """
+    env_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    if env_key:
+        # Basic sanity check: ElevenLabs keys are non-trivial length.
+        if len(env_key) < 20:
+            raise ElevenLabsError("ELEVENLABS_API_KEY looks too short; check provisioning.")
+        return env_key
+
     try:
         key = SECRET_KEY_PATH.read_text(encoding="utf-8").strip()
     except FileNotFoundError as e:
         raise ElevenLabsError(
-            f"ElevenLabs API key file not found at {SECRET_KEY_PATH}. "
-            "This hub is not provisioned for TTS."
+            f"ElevenLabs API key not found. Set ELEVENLABS_API_KEY or provision {SECRET_KEY_PATH}."
         ) from e
 
     if not key:
-        raise ElevenLabsError(
-            f"ElevenLabs API key file at {SECRET_KEY_PATH} is empty."
-        )
+        raise ElevenLabsError(f"ElevenLabs API key file at {SECRET_KEY_PATH} is empty.")
 
-    # Basic sanity check: ElevenLabs keys are non-trivial length.
     if len(key) < 20:
-        raise ElevenLabsError(
-            "ElevenLabs API key looks too short; check provisioning."
-        )
+        raise ElevenLabsError("ElevenLabs API key looks too short; check provisioning.")
 
     return key
 
@@ -93,7 +99,7 @@ def synthesize(
     *,
     voice_id: str,
     model_id: str = "eleven_multilingual_v2",
-    output_format: str = "wav",
+    output_format: str = "pcm_16000",
     stability: float | None = None,
     similarity_boost: float | None = None,
     style: float | None = None,
@@ -106,7 +112,7 @@ def synthesize(
         text: The text to speak.
         voice_id: The ElevenLabs voice ID.
         model_id: The ElevenLabs model ID.
-        output_format: Currently supports 'wav' or 'mp3'.
+        output_format: ElevenLabs output_format (use a pcm_* value to get a WAV file, e.g. 'pcm_16000').
         stability/similarity_boost/style/speaker_boost: Optional voice settings.
         timeout_sec: HTTP timeout.
 
@@ -121,19 +127,19 @@ def synthesize(
     if not t:
         raise ElevenLabsError("synthesize(): text is empty")
 
-    if output_format not in ("wav", "mp3"):
-        raise ElevenLabsError("output_format must be 'wav' or 'mp3'")
+    # ElevenLabs supports multiple output formats; for "just give me a WAV" we use pcm_*.
+    if not output_format:
+        raise ElevenLabsError("output_format is empty")
 
     api_key = _read_api_key()
 
     # ElevenLabs TTS endpoint.
-    # Docs: https://elevenlabs.io/docs/api-reference/text-to-speech
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    # Request WAV by using a pcm_* output_format (ElevenLabs returns a WAV container).
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format={output_format}"
 
     headers = {
         "xi-api-key": api_key,
-        # We'll request audio directly.
-        "Accept": "audio/mpeg" if output_format == "mp3" else "audio/wav",
+        "Accept": "audio/wav",
     }
 
     voice_settings: dict[str, Any] = {}
@@ -153,12 +159,6 @@ def synthesize(
     if voice_settings:
         payload["voice_settings"] = voice_settings
 
-    # Some accounts/voices support output format query params.
-    # Keep this conservative: if unsupported, API will ignore or error.
-    if output_format == "mp3":
-        # Many APIs default to mp3 if Accept is audio/mpeg.
-        pass
-
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -175,18 +175,23 @@ def synthesize(
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             audio = resp.read()
             ct = resp.headers.get("Content-Type", "")
-            # Normalize content type.
-            if output_format == "mp3":
-                content_type = "audio/mpeg"
-                ext = "mp3"
-            else:
-                content_type = "audio/wav"
-                ext = "wav"
 
             if not audio:
                 raise ElevenLabsError("Empty audio response from ElevenLabs")
 
-            # Some responses may include a content-type; trust it if it matches.
+            # We expect a WAV container when using pcm_* formats.
+            # WAV files start with RIFF....WAVE.
+            if output_format.startswith("pcm_"):
+                if not (audio.startswith(b"RIFF") and b"WAVE" in audio[:32]):
+                    head = audio[:32]
+                    raise ElevenLabsError(
+                        f"Expected WAV (RIFF/WAVE) from ElevenLabs but got different bytes: {head!r}"
+                    )
+
+            content_type = "audio/wav"
+            ext = "wav"
+
+            # Prefer server-provided content-type if it is audio/*
             if ct.startswith("audio/"):
                 content_type = ct.split(";")[0].strip()
 
@@ -252,11 +257,11 @@ def api_key_present() -> bool:
 
 if __name__ == "__main__":
     # Minimal smoke test (requires the secret file on the hub)
-    vid = os.environ.get("HINT_TEST_VOICE_ID")
+    vid = os.environ.get("ELEVENLABS_VOICE_ID")
     if not vid:
-        raise SystemExit("Set HINT_TEST_VOICE_ID to run the smoke test.")
+        raise SystemExit("Set ELEVENLABS_VOICE_ID to run the smoke test.")
 
-    r = synthesize("Hello from HintPlatform.", voice_id=vid, output_format="wav")
+    r = synthesize("Hello from HintPlatform.", voice_id=vid, output_format="pcm_16000")
     out = Path("/tmp/hint_tts_test." + r.ext)
     out.write_bytes(r.audio)
     print(f"Wrote {len(r.audio)} bytes to {out}")

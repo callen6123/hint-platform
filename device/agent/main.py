@@ -87,6 +87,11 @@ def _find_usb_card() -> str | None:
 
 def _aplay_cmd_for(path: Path) -> list[str]:
     card = _find_usb_card()
+    if path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
+        if card:
+            return ["mpg123", "-a", f"plughw:{card},0", str(path)]
+        return ["mpg123", str(path)]
+
     if card:
         # Use plughw so ALSA can convert formats (e.g., U8->S16_LE) for USB devices.
         return ["aplay", "-D", f"plughw:{card},0", str(path)]
@@ -292,6 +297,23 @@ def download_speak_audio(url: str, *, audio_id: str | None = None) -> Path:
                 f.write(chunk)
 
         tmp.replace(out_path)
+
+        # Validate file type: ensure WAV RIFF header, otherwise detect MP3 and rename
+        try:
+            with out_path.open("rb") as chk:
+                header = chk.read(12)
+            if not (len(header) >= 12 and header[0:4] == b"RIFF" and header[8:12] == b"WAVE"):
+                # Possibly MP3 (ID3 or frame sync). Rename to .mp3 so player handles correctly.
+                if header.startswith(b"ID3") or header[:2] == b"\xff\xfb" or header[:2] == b"\xff\xf3" or header[:2] == b"\xff\xf2":
+                    mp3_path = out_path.with_suffix(".mp3")
+                    out_path.rename(mp3_path)
+                    print(f"[AUDIO] downloaded MP3 instead of WAV; renamed to {mp3_path}")
+                    return mp3_path
+                else:
+                    raise RuntimeError("invalid_audio_format: not WAV or MP3")
+        except Exception as e:
+            out_path.unlink(missing_ok=True)
+            raise
 
     return out_path
 
