@@ -88,7 +88,8 @@ def _find_usb_card() -> str | None:
 def _aplay_cmd_for(path: Path) -> list[str]:
     card = _find_usb_card()
     if card:
-        return ["aplay", "-D", f"hw:{card},0", str(path)]
+        # Use plughw so ALSA can convert formats (e.g., U8->S16_LE) for USB devices.
+        return ["aplay", "-D", f"plughw:{card},0", str(path)]
     return ["aplay", str(path)]
 
 
@@ -113,6 +114,39 @@ def play_file(path: Path) -> None:
             print(f"[AUDIO] stdout: {out}")
         if err:
             print(f"[AUDIO] stderr: {err}")
+
+        # If the WAV is in an unsupported PCM format, try converting to 16-bit PCM WAV.
+        # (Some USB DACs only advertise S16_LE.)
+        if ("Sample format non available" in err) and shutil.which("sox"):
+            try:
+                converted = path.with_suffix(".s16.wav")
+                conv_cmd = [
+                    "sox",
+                    str(path),
+                    "-b",
+                    "16",
+                    "-e",
+                    "signed-integer",
+                    str(converted),
+                ]
+                conv = subprocess.run(conv_cmd, capture_output=True, text=True)
+                if conv.returncode == 0 and converted.exists():
+                    print(f"[AUDIO] converted to 16-bit PCM via {conv_cmd}: {converted}")
+                    cmd2 = _aplay_cmd_for(converted)
+                    res2 = subprocess.run(cmd2, capture_output=True, text=True)
+                    if res2.returncode == 0:
+                        print(f"[AUDIO] played converted {converted} via {cmd2}")
+                        return
+                    else:
+                        err2 = (res2.stderr or "").strip()
+                        out2 = (res2.stdout or "").strip()
+                        print(f"[AUDIO] converted play failed rc={res2.returncode} cmd={cmd2}")
+                        if out2:
+                            print(f"[AUDIO] stdout: {out2}")
+                        if err2:
+                            print(f"[AUDIO] stderr: {err2}")
+            except Exception as e:
+                print(f"[AUDIO] conversion fallback failed: {e}")
 
         time.sleep(0.5)
 
