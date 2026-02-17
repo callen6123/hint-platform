@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file, abort
 import os
+import sys
 import subprocess
 import secrets
 import string
@@ -8,20 +9,35 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Local hub modules (these live next to this file inside the repo)
+# Ensure repo root is on sys.path even when this file is executed as a script
+# (e.g. ExecStart=/usr/bin/python3 /home/hub/hint-platform/hub/hub_pair.py)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Local hub modules
 # audio_server.py: stores/serves generated audio with per-device token auth
-# tts.py: ElevenLabs client wrapper (implemented separately)
+# tts.py: ElevenLabs client wrapper
 try:
+    # When executed as a package module: python3 -m hub.hub_pair
     from hub.audio_server import bp as audio_bp, store_audio, build_audio_url
 except Exception:
-    audio_bp = None
-    store_audio = None
-    build_audio_url = None
+    try:
+        # When executed as a script from /home/hub/hint-platform/hub
+        from audio_server import bp as audio_bp, store_audio, build_audio_url
+    except Exception:
+        audio_bp = None
+        store_audio = None
+        build_audio_url = None
 
 try:
-    import tts
+    # Prefer package import
+    from hub import tts
 except Exception:
-    tts = None
+    try:
+        import tts
+    except Exception:
+        tts = None
 
 app = Flask(__name__)
 
