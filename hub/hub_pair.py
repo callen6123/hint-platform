@@ -12,7 +12,7 @@ from pathlib import Path
 # audio_server.py: stores/serves generated audio with per-device token auth
 # tts.py: ElevenLabs client wrapper (implemented separately)
 try:
-    from audio_server import bp as audio_bp, store_audio, build_audio_url
+    from hub.audio_server import bp as audio_bp, store_audio, build_audio_url
 except Exception:
     audio_bp = None
     store_audio = None
