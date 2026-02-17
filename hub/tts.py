@@ -139,7 +139,8 @@ def synthesize(
 
     headers = {
         "xi-api-key": api_key,
-        "Accept": "audio/wav",
+        # Let the server choose the proper audio type for the selected output_format.
+        "Accept": "*/*",
     }
 
     voice_settings: dict[str, Any] = {}
@@ -179,14 +180,34 @@ def synthesize(
             if not audio:
                 raise ElevenLabsError("Empty audio response from ElevenLabs")
 
-            # We expect a WAV container when using pcm_* formats.
-            # WAV files start with RIFF....WAVE.
+            # ElevenLabs `pcm_*` formats return raw S16LE PCM (no WAV header).
+            # Wrap into a WAV container so devices can play it reliably via aplay.
             if output_format.startswith("pcm_"):
-                if not (audio.startswith(b"RIFF") and b"WAVE" in audio[:32]):
-                    head = audio[:32]
+                try:
+                    sr = int(output_format.split("_", 1)[1])
+                except Exception:
+                    sr = 16000
+
+                # Guard: if we accidentally got back JSON/HTML, fail fast with a hint.
+                head = audio[:64]
+                if head.lstrip().startswith(b"{") or head.lstrip().startswith(b"<"):
                     raise ElevenLabsError(
-                        f"Expected WAV (RIFF/WAVE) from ElevenLabs but got different bytes: {head!r}"
+                        f"Expected raw PCM bytes but got text/HTML/JSON (head={head!r}). Check auth/voice_id/output_format."
                     )
+
+                try:
+                    import io
+                    import wave
+
+                    bio = io.BytesIO()
+                    with wave.open(bio, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)  # S16LE
+                        wf.setframerate(sr)
+                        wf.writeframes(audio)
+                    audio = bio.getvalue()
+                except Exception as e:
+                    raise ElevenLabsError(f"Failed to wrap PCM into WAV: {e}") from e
 
             content_type = "audio/wav"
             ext = "wav"
