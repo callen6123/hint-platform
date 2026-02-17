@@ -928,7 +928,33 @@ def ui_speak():
 
     # Synthesize audio bytes on hub
     try:
-        audio_bytes, ext = tts.synthesize(text=text, **tts_opts)
+        res = tts.synthesize(text=text, **tts_opts)
+
+        # Support multiple return shapes:
+        #  - (audio_bytes, ext)
+        #  - dict-like {audio_bytes/audio, ext/format}
+        #  - object with attributes (e.g. TTSResult)
+        audio_bytes = None
+        ext = None
+
+        if isinstance(res, tuple) and len(res) >= 1:
+            audio_bytes = res[0]
+            if len(res) >= 2:
+                ext = res[1]
+        elif isinstance(res, dict):
+            audio_bytes = res.get("audio_bytes") or res.get("audio") or res.get("bytes")
+            ext = res.get("ext") or res.get("format") or res.get("mime")
+        else:
+            # Attribute-based (TTSResult, etc.)
+            for a in ("audio_bytes", "audio", "bytes"):
+                if hasattr(res, a):
+                    audio_bytes = getattr(res, a)
+                    break
+            for a in ("ext", "format", "mime"):
+                if hasattr(res, a):
+                    ext = getattr(res, a)
+                    break
+
     except TypeError as e:
         # If the signature changed, surface a clear error
         msg = str(e)
@@ -947,9 +973,16 @@ def ui_speak():
     except Exception as e:
         return jsonify({"ok": False, "error": f"tts_failed:{e}"}), 500
 
+    # Normalize
+    if isinstance(audio_bytes, memoryview):
+        audio_bytes = audio_bytes.tobytes()
+
     if not isinstance(audio_bytes, (bytes, bytearray)) or len(audio_bytes) == 0:
         return jsonify({"ok": False, "error": "tts_empty_audio"}), 500
-    ext = str(ext or "mp3").lstrip(".")
+
+    ext = str(ext or "mp3").strip().lstrip(".")
+    if not ext or any(ch in ext for ch in ("/", "\\", " ")):
+        ext = "mp3"
 
     try:
         audio_id = store_audio(bytes(audio_bytes), ext=ext)
