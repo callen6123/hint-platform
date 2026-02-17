@@ -905,12 +905,45 @@ def ui_speak():
     # Optional TTS options
     tts_opts = body.get("tts") if isinstance(body.get("tts"), dict) else {}
 
+    # Ensure required ElevenLabs params are present
+    # Our tts.synthesize() requires keyword-only voice_id.
+    if not isinstance(tts_opts, dict):
+        tts_opts = {}
+
+    default_voice_id = (
+        os.environ.get("ELEVENLABS_VOICE_ID")
+        or os.environ.get("ELEVENLABS_DEFAULT_VOICE_ID")
+        or ""
+    ).strip()
+
+    if not str(tts_opts.get("voice_id") or "").strip():
+        if default_voice_id:
+            tts_opts["voice_id"] = default_voice_id
+        else:
+            return jsonify({
+                "ok": False,
+                "error": "voice_id_required",
+                "hint": "Provide tts.voice_id in the request, or set ELEVENLABS_VOICE_ID in /etc/hint/hub.env",
+            }), 400
+
     # Synthesize audio bytes on hub
     try:
         audio_bytes, ext = tts.synthesize(text=text, **tts_opts)
-    except TypeError:
-        # Back-compat if synthesize() doesn't accept kwargs yet
-        audio_bytes, ext = tts.synthesize(text=text)
+    except TypeError as e:
+        # If the signature changed, surface a clear error
+        msg = str(e)
+        if "voice_id" in msg:
+            return jsonify({
+                "ok": False,
+                "error": "voice_id_required",
+                "detail": msg,
+                "hint": "Set ELEVENLABS_VOICE_ID or pass tts.voice_id",
+            }), 400
+        return jsonify({
+            "ok": False,
+            "error": "tts_type_error",
+            "detail": msg,
+        }), 500
     except Exception as e:
         return jsonify({"ok": False, "error": f"tts_failed:{e}"}), 500
 
