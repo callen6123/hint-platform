@@ -984,13 +984,38 @@ def ui_speak():
     if not ext or any(ch in ext for ch in ("/", "\\", " ")):
         ext = "mp3"
 
+    # Store audio and normalize the returned identifier (store_audio may return a string id,
+    # a dict, a tuple, or an object like StoredAudio).
     try:
-        audio_id = store_audio(bytes(audio_bytes), ext=ext)
+        stored = store_audio(bytes(audio_bytes), ext=ext)
     except Exception as e:
         return jsonify({"ok": False, "error": f"audio_store_failed:{e}"}), 500
 
+    audio_id = None
+    if isinstance(stored, str):
+        audio_id = stored
+    elif isinstance(stored, (tuple, list)) and stored:
+        audio_id = stored[0]
+    elif isinstance(stored, dict):
+        audio_id = stored.get("audio_id") or stored.get("id")
+    else:
+        # Attribute-based (e.g. StoredAudio)
+        for a in ("audio_id", "id"):
+            if hasattr(stored, a):
+                audio_id = getattr(stored, a)
+                break
+
+    audio_id = str(audio_id or "").strip()
+    if not audio_id:
+        return jsonify({"ok": False, "error": "audio_store_failed:missing_audio_id"}), 500
+
     try:
-        url = build_audio_url(base_url=HUB_BASE_URL, audio_id=audio_id, device_id=device_id, token=ota_token)
+        url = build_audio_url(
+            base_url=HUB_BASE_URL,
+            audio_id=audio_id,
+            device_id=device_id,
+            token=ota_token,
+        )
     except Exception as e:
         return jsonify({"ok": False, "error": f"audio_url_failed:{e}"}), 500
 
