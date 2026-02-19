@@ -85,6 +85,7 @@ def _find_usb_card() -> str | None:
                     return cardid
     return None
 
+
 def _aplay_cmd_for(path: Path) -> list[str]:
     card = _find_usb_card()
     if path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
@@ -98,23 +99,70 @@ def _aplay_cmd_for(path: Path) -> list[str]:
     return ["aplay", str(path)]
 
 
+# --- Helper: sniff audio type by magic bytes
+def sniff_audio_type(path: Path) -> str:
+    """Return 'wav', 'mp3', or 'unknown' based on file magic."""
+    try:
+        with path.open("rb") as f:
+            header = f.read(12)
+    except Exception:
+        return "unknown"
+
+    if len(header) >= 12 and header[0:4] == b"RIFF" and header[8:12] == b"WAVE":
+        return "wav"
+
+    # MP3: ID3 tag or MPEG frame sync
+    if header.startswith(b"ID3"):
+        return "mp3"
+    if len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
+        return "mp3"
+
+    return "unknown"
+
+
 def play_file(path: Path) -> None:
     if not path.exists():
         print(f"[AUDIO] missing file: {path}")
         return
 
-    cmd = _aplay_cmd_for(path)
+    primary = _aplay_cmd_for(path)
+
+    # Fallbacks: try default device if a specific ALSA device fails.
+    fallbacks: list[list[str]] = []
+
+    if primary and primary[0] == "aplay":
+        # If primary uses -D plughw:..., try 'default' and finally bare 'aplay'.
+        if "-D" in primary:
+            fallbacks.append(["aplay", "-D", "default", str(path)])
+        fallbacks.append(["aplay", str(path)])
+
+    if primary and primary[0] == "mpg123":
+        # If primary uses -a plughw:..., try without explicit device.
+        fallbacks.append(["mpg123", str(path)])
+
+    cmd_candidates = [primary] + fallbacks
 
     # Retry a few times to handle USB “not ready” moments
     for attempt in range(1, 6):
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0:
-            print(f"[AUDIO] played {path} via {cmd}")
-            return
+        last_err = ""
+        last_out = ""
+        last_rc = 0
+        last_cmd: list[str] = []
 
-        err = (res.stderr or "").strip()
-        out = (res.stdout or "").strip()
-        print(f"[AUDIO] attempt {attempt}/5 failed rc={res.returncode} cmd={cmd}")
+        for cmd in cmd_candidates:
+            last_cmd = cmd
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0:
+                print(f"[AUDIO] played {path} via {cmd}")
+                return
+
+            last_rc = res.returncode
+            last_err = (res.stderr or "").strip()
+            last_out = (res.stdout or "").strip()
+
+        err = last_err
+        out = last_out
+        print(f"[AUDIO] attempt {attempt}/5 failed rc={last_rc} cmd={last_cmd}")
         if out:
             print(f"[AUDIO] stdout: {out}")
         if err:
@@ -137,19 +185,30 @@ def play_file(path: Path) -> None:
                 conv = subprocess.run(conv_cmd, capture_output=True, text=True)
                 if conv.returncode == 0 and converted.exists():
                     print(f"[AUDIO] converted to 16-bit PCM via {conv_cmd}: {converted}")
-                    cmd2 = _aplay_cmd_for(converted)
-                    res2 = subprocess.run(cmd2, capture_output=True, text=True)
-                    if res2.returncode == 0:
-                        print(f"[AUDIO] played converted {converted} via {cmd2}")
-                        return
-                    else:
-                        err2 = (res2.stderr or "").strip()
-                        out2 = (res2.stdout or "").strip()
-                        print(f"[AUDIO] converted play failed rc={res2.returncode} cmd={cmd2}")
-                        if out2:
-                            print(f"[AUDIO] stdout: {out2}")
-                        if err2:
-                            print(f"[AUDIO] stderr: {err2}")
+
+                    primary2 = _aplay_cmd_for(converted)
+                    fallbacks2: list[list[str]] = []
+                    if primary2 and primary2[0] == "aplay":
+                        if "-D" in primary2:
+                            fallbacks2.append(["aplay", "-D", "default", str(converted)])
+                        fallbacks2.append(["aplay", str(converted)])
+                    if primary2 and primary2[0] == "mpg123":
+                        fallbacks2.append(["mpg123", str(converted)])
+
+                    for cmd2 in [primary2] + fallbacks2:
+                        res2 = subprocess.run(cmd2, capture_output=True, text=True)
+                        if res2.returncode == 0:
+                            print(f"[AUDIO] played converted {converted} via {cmd2}")
+                            return
+
+                    # If we got here, all converted attempts failed; log last result
+                    err2 = (res2.stderr or "").strip() if 'res2' in locals() else ""
+                    out2 = (res2.stdout or "").strip() if 'res2' in locals() else ""
+                    print(f"[AUDIO] converted play failed rc={res2.returncode if 'res2' in locals() else 'n/a'} cmd={cmd2 if 'cmd2' in locals() else 'n/a'}")
+                    if out2:
+                        print(f"[AUDIO] stdout: {out2}")
+                    if err2:
+                        print(f"[AUDIO] stderr: {err2}")
             except Exception as e:
                 print(f"[AUDIO] conversion fallback failed: {e}")
 
@@ -267,8 +326,8 @@ def download_speak_audio(url: str, *, audio_id: str | None = None) -> Path:
 
     # Choose filename
     safe_id = (audio_id or f"speak-{int(time.time())}").replace("/", "_").replace("..", "_")
-    # Default extension; we may replace based on headers later if needed
-    out_path = AUDIO_CACHE_DIR / f"{safe_id}.wav"
+    # Start as .bin and rename once we inspect magic bytes
+    out_path = AUDIO_CACHE_DIR / f"{safe_id}.bin"
 
     req = urllib.request.Request(url, headers={"User-Agent": "hint-agent/1"})
     with urllib.request.urlopen(req, timeout=SPEAK_DOWNLOAD_TIMEOUT) as r:
@@ -298,20 +357,24 @@ def download_speak_audio(url: str, *, audio_id: str | None = None) -> Path:
 
         tmp.replace(out_path)
 
-        # Validate file type: ensure WAV RIFF header, otherwise detect MP3 and rename
+        # Decide final extension by magic bytes (never let MP3 be named .wav)
         try:
-            with out_path.open("rb") as chk:
-                header = chk.read(12)
-            if not (len(header) >= 12 and header[0:4] == b"RIFF" and header[8:12] == b"WAVE"):
-                # Possibly MP3 (ID3 or frame sync). Rename to .mp3 so player handles correctly.
-                if header.startswith(b"ID3") or header[:2] == b"\xff\xfb" or header[:2] == b"\xff\xf3" or header[:2] == b"\xff\xf2":
-                    mp3_path = out_path.with_suffix(".mp3")
-                    out_path.rename(mp3_path)
-                    print(f"[AUDIO] downloaded MP3 instead of WAV; renamed to {mp3_path}")
-                    return mp3_path
-                else:
-                    raise RuntimeError("invalid_audio_format: not WAV or MP3")
-        except Exception as e:
+            atype = sniff_audio_type(out_path)
+            if atype == "wav":
+                final_path = out_path.with_suffix(".wav")
+                out_path.rename(final_path)
+                return final_path
+            if atype == "mp3":
+                final_path = out_path.with_suffix(".mp3")
+                out_path.rename(final_path)
+                print(f"[AUDIO] downloaded MP3; saved as {final_path}")
+                return final_path
+
+            # Unknown: show a short preview for debugging
+            with out_path.open("rb") as f:
+                preview = f.read(32)
+            raise RuntimeError(f"invalid_audio_format: magic={preview!r}")
+        except Exception:
             out_path.unlink(missing_ok=True)
             raise
 
@@ -434,9 +497,10 @@ def main() -> None:
 
                 publish_state("PLAYING")
                 local_path = download_speak_audio(url, audio_id=str(audio_id) if audio_id else None)
+                atype = sniff_audio_type(local_path)
                 play_file(local_path)
                 publish_state("IDLE")
-                publish_ack(str(cid), "completed", {"audio_id": audio_id, "file": str(local_path)})
+                publish_ack(str(cid), "completed", {"audio_id": audio_id, "file": str(local_path), "audio_type": atype})
 
             else:
                 # Back-compat: treat unknown command as play test
