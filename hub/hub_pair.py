@@ -2331,7 +2331,10 @@ def dashboard():
       const lr = lastResult(d);
       return `
         <tr>
-          <td><span class=\"pill\">${did}</span></td>
+          <td>
+            ${d.friendly_name ? `<div><b>${String(d.friendly_name)}</b></div>` : ``}
+            <span class=\"pill\">${did}</span>
+          </td>
           <td class=\"${statusClass(st)}\">${st}</td>
           <td class=\"muted\">${ls}</td>
           <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
