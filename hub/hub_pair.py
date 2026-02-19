@@ -54,6 +54,7 @@ PAIR_CODE = "483921"  # you will type this into the device setup page
 
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
+UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
 OTA_DIR = Path("/opt/hint/ota")
 BUILD_OTA_SCRIPT = Path("/home/hub/hint-platform/hub/build_ota.py")
 
@@ -423,6 +424,74 @@ def write_registry(reg: dict) -> None:
     subprocess.run(["sudo", "mv", str(tmp_path), str(REGISTRY_PATH)], check=True)
     subprocess.run(["sudo", "chown", "root:hub", str(REGISTRY_PATH)], check=True)
     subprocess.run(["sudo", "chmod", "664", str(REGISTRY_PATH)], check=True)
+
+
+# --- UI config helpers ---
+
+def read_ui_config() -> dict:
+    """UI config stored in /var/lib/hint/ui_config.json.
+
+    Shape:
+      {
+        "devices": {
+          "device-...": {"friendly_name": "...", "default_voice_id": "..."}
+        },
+        "phrases": [
+          {"id": "p-...", "label": "...", "text": "..."}
+        ]
+      }
+    """
+    if not UI_CONFIG_PATH.exists():
+        return {"devices": {}, "phrases": []}
+
+    try:
+        res = subprocess.run(
+            ["sudo", "cat", str(UI_CONFIG_PATH)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        txt = res.stdout.strip()
+        if not txt:
+            return {"devices": {}, "phrases": []}
+        d = json.loads(txt)
+        if not isinstance(d, dict):
+            return {"devices": {}, "phrases": []}
+        if not isinstance(d.get("devices"), dict):
+            d["devices"] = {}
+        if not isinstance(d.get("phrases"), list):
+            d["phrases"] = []
+        return d
+    except Exception:
+        return {"devices": {}, "phrases": []}
+
+
+def write_ui_config(cfg: dict) -> None:
+    ensure_registry_dir()
+
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if not isinstance(cfg.get("devices"), dict):
+        cfg["devices"] = {}
+    if not isinstance(cfg.get("phrases"), list):
+        cfg["phrases"] = []
+
+    tmp_path = Path(f"/tmp/hint-ui-config-{os.getpid()}.json")
+    tmp_path.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    subprocess.run(["sudo", "mv", str(tmp_path), str(UI_CONFIG_PATH)], check=True)
+    subprocess.run(["sudo", "chown", "root:hub", str(UI_CONFIG_PATH)], check=True)
+    subprocess.run(["sudo", "chmod", "664", str(UI_CONFIG_PATH)], check=True)
+
+
+def get_device_ui_cfg(device_id: str) -> dict:
+    cfg = read_ui_config()
+    devs = cfg.get("devices") if isinstance(cfg, dict) else None
+    if not isinstance(devs, dict):
+        return {}
+    v = devs.get(device_id)
+    return v if isinstance(v, dict) else {}
 
 
 def upsert_device(device_id: str, site_id: str, mqtt_user: str, ota_token: str) -> None:
@@ -973,6 +1042,147 @@ def ui_voices():
         "error": info.get("error"),
     })
 
+
+# --- UI device config and phrases endpoints ---
+
+@app.post("/ui/device/config")
+def ui_device_config_set():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    friendly_name = body.get("friendly_name")
+    default_voice_id = body.get("default_voice_id")
+
+    if friendly_name is not None:
+        friendly_name = str(friendly_name).strip()
+        # keep it sane
+        friendly_name = friendly_name[:64]
+
+    if default_voice_id is not None:
+        default_voice_id = str(default_voice_id).strip()
+        default_voice_id = default_voice_id[:128]
+
+    cfg = read_ui_config()
+    devs = cfg.get("devices")
+    if not isinstance(devs, dict):
+        devs = {}
+        cfg["devices"] = devs
+
+    rec = devs.get(device_id)
+    if not isinstance(rec, dict):
+        rec = {}
+
+    if friendly_name is not None:
+        rec["friendly_name"] = friendly_name
+    if default_voice_id is not None:
+        rec["default_voice_id"] = default_voice_id
+
+    devs[device_id] = rec
+    write_ui_config(cfg)
+
+    return jsonify({"ok": True, "device_id": device_id, "config": rec})
+
+
+@app.get("/ui/phrases")
+def ui_phrases_get():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    cfg = read_ui_config()
+    phrases = cfg.get("phrases") if isinstance(cfg, dict) else []
+    if not isinstance(phrases, list):
+        phrases = []
+
+    # sanitize output
+    out = []
+    for p in phrases:
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id") or "").strip()
+        label = str(p.get("label") or "").strip()
+        textv = str(p.get("text") or "").strip()
+        if not pid:
+            continue
+        out.append({"id": pid, "label": label, "text": textv})
+
+    out.sort(key=lambda x: (x.get("label") or x.get("id") or ""))
+    return jsonify({"ok": True, "phrases": out})
+
+
+@app.post("/ui/phrases")
+def ui_phrases_upsert():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    label = str(body.get("label") or "").strip()
+    textv = str(body.get("text") or "").strip()
+    pid = str(body.get("id") or "").strip()
+
+    if not label:
+        return jsonify({"ok": False, "error": "label_required"}), 400
+    if not textv:
+        return jsonify({"ok": False, "error": "text_required"}), 400
+
+    label = label[:64]
+    textv = textv[:2000]
+
+    if not pid:
+        pid = sanitize_topic_id(f"p-{int(time.time())}-{secrets.token_hex(3)}")
+
+    cfg = read_ui_config()
+    phrases = cfg.get("phrases")
+    if not isinstance(phrases, list):
+        phrases = []
+        cfg["phrases"] = phrases
+
+    updated = False
+    for p in phrases:
+        if isinstance(p, dict) and str(p.get("id") or "") == pid:
+            p["label"] = label
+            p["text"] = textv
+            updated = True
+            break
+
+    if not updated:
+        phrases.append({"id": pid, "label": label, "text": textv})
+
+    write_ui_config(cfg)
+    return jsonify({"ok": True, "id": pid, "label": label, "text": textv, "updated": updated})
+
+
+@app.post("/ui/phrases/delete")
+def ui_phrases_delete():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    pid = str(body.get("id") or "").strip()
+    if not pid:
+        return jsonify({"ok": False, "error": "id_required"}), 400
+
+    cfg = read_ui_config()
+    phrases = cfg.get("phrases") if isinstance(cfg, dict) else None
+    if not isinstance(phrases, list):
+        return jsonify({"ok": True, "deleted": False})
+
+    before = len(phrases)
+    cfg["phrases"] = [p for p in phrases if not (isinstance(p, dict) and str(p.get("id") or "") == pid)]
+    deleted = len(cfg["phrases"]) != before
+    if deleted:
+        write_ui_config(cfg)
+
+    return jsonify({"ok": True, "deleted": deleted, "id": pid})
+
 # --- UI TTS speak endpoint ---
 
 @app.post("/ui/speak")
@@ -1020,11 +1230,15 @@ def ui_speak():
     if not isinstance(tts_opts, dict):
         tts_opts = {}
 
-    default_voice_id = (
-        os.environ.get("ELEVENLABS_VOICE_ID")
-        or os.environ.get("ELEVENLABS_DEFAULT_VOICE_ID")
-        or ""
-    ).strip()
+    # Prefer per-device default voice set via UI config, then env default.
+    ui_dev_cfg = get_device_ui_cfg(device_id)
+    default_voice_id = str(ui_dev_cfg.get("default_voice_id") or "").strip()
+    if not default_voice_id:
+        default_voice_id = (
+            os.environ.get("ELEVENLABS_VOICE_ID")
+            or os.environ.get("ELEVENLABS_DEFAULT_VOICE_ID")
+            or ""
+        ).strip()
 
     if not str(tts_opts.get("voice_id") or "").strip():
         if default_voice_id:
@@ -1171,10 +1385,22 @@ def ui_status():
     if not isinstance(reg, dict):
         reg = {}
 
+    ui_cfg = read_ui_config()
+    ui_devs = ui_cfg.get("devices") if isinstance(ui_cfg, dict) else {}
+    if not isinstance(ui_devs, dict):
+        ui_devs = {}
+
     devices = []
     for _, rec in reg.items():
         if isinstance(rec, dict):
-            devices.append(rec)
+            drec = dict(rec)
+            u = ui_devs.get(str(drec.get("device_id") or ""))
+            if isinstance(u, dict):
+                if "friendly_name" in u:
+                    drec["friendly_name"] = u.get("friendly_name")
+                if "default_voice_id" in u:
+                    drec["default_voice_id"] = u.get("default_voice_id")
+            devices.append(drec)
 
     devices.sort(key=lambda r: str(r.get("device_id", "")))
     ota_latest = _read_ota_latest_version()
@@ -1546,7 +1772,7 @@ def speak_page():
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>Hint Hub - Speak</title>
-  <style>
+    <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
     header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     nav a { margin-right: 10px; text-decoration: none; }
@@ -1559,6 +1785,10 @@ def speak_page():
     .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     .muted { color:#666; }
     .log { margin-top: 12px; padding: 10px; background: #111; color: #eee; border-radius: 6px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; font-size: 12px; }
+    .phrases { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .phraseBtn { padding: 6px 10px; border: 1px solid #333; background: #fff; border-radius: 6px; }
+    .small { font-size: 12px; }
+    .danger { border-color:#a00; color:#a00; }
   </style>
 </head>
 <body>
@@ -1586,13 +1816,31 @@ def speak_page():
       </div>
     </div>
 
-    <label for=\"text\">Message</label>
-    <textarea id=\"text\" placeholder=\"Type what you want the character to say…\"></textarea>
+    <div class="row" style="margin-top:10px;">
+      <input id="friendlyName" type="text" placeholder="Device name (optional)" />
+      <button id="saveDeviceCfgBtn">Save device settings</button>
+      <span class="muted small" id="devCfgStatus"></span>
+    </div>
 
-    <div class=\"row\" style=\"margin-top:10px;\">
-      <button id=\"speakBtn\">Generate + Play</button>
-      <button id=\"refreshBtn\">Refresh devices/voices</button>
-      <span class=\"muted\" id=\"status\"></span>
+    <label for="text">Message</label>
+    <textarea id="text" placeholder="Type what you want the character to say…"></textarea>
+
+    <div class="row" style="margin-top:10px;">
+      <button id="speakBtn">Generate + Play</button>
+      <button id="refreshBtn">Refresh devices/voices</button>
+      <span class="muted" id="status"></span>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <h3 style="margin:0 0 8px 0; font-size:14px;">Saved phrases</h3>
+      <div class="row">
+        <input id="phraseLabel" type="text" placeholder="Label (e.g., Hint 1)" />
+        <button id="savePhraseBtn">Save phrase</button>
+        <button id="deletePhraseBtn" class="danger" disabled>Delete selected</button>
+        <span class="muted small" id="phraseStatus"></span>
+      </div>
+      <div class="muted small" style="margin-top:6px;">Click a phrase to load its text. Save overwrites if a phrase is selected.</div>
+      <div class="phrases" id="phrases"></div>
     </div>
   </div>
 
@@ -1602,6 +1850,10 @@ def speak_page():
 (function(){
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
+
+  let cachedDevices = [];
+  let cachedVoices = [];
+  let selectedPhraseId = '';
 
   function log(msg){
     const ts = new Date().toISOString();
@@ -1623,6 +1875,17 @@ def speak_page():
   function setStatus(s){
     $("status").textContent = s || '';
   }
+  function setDevCfgStatus(s){
+    $("devCfgStatus").textContent = s || '';
+  }
+  function setPhraseStatus(s){
+    $("phraseStatus").textContent = s || '';
+  }
+  function setSelectedPhrase(pid){
+    selectedPhraseId = pid || '';
+    const delBtn = $("deletePhraseBtn");
+    if (delBtn) delBtn.disabled = !selectedPhraseId;
+  }
 
   function savePrefs(){
     try {
@@ -1642,16 +1905,31 @@ def speak_page():
     }
   }
 
+  function applyDeviceDefaultVoice(){
+    const did = $("device").value || '';
+    const d = cachedDevices.find(x => (x.device_id || '') === did);
+    const dv = d && d.default_voice_id ? String(d.default_voice_id) : '';
+    if (!dv) return;
+    // Only set if voice exists
+    const has = cachedVoices.some(v => String(v.voice_id) === dv);
+    if (has) {
+      $("voice").value = dv;
+      savePrefs();
+    }
+  }
+
   async function loadDevices(){
     const data = await api('/ui/status', 'GET');
     const devices = (data.devices || []).filter(d => d && d.device_id);
+    cachedDevices = devices;
     const sel = $("device");
     sel.innerHTML = '';
     devices.forEach(d => {
       const opt = document.createElement('option');
       opt.value = d.device_id;
       const st = d.status || 'unknown';
-      opt.textContent = `${d.device_id} (${st})`;
+      const fn = d.friendly_name ? String(d.friendly_name).trim() : '';
+      opt.textContent = fn ? `${fn} — ${d.device_id} (${st})` : `${d.device_id} (${st})`;
       sel.appendChild(opt);
     });
     $("deviceHint").textContent = devices.length ? '' : 'No devices paired yet.';
@@ -1662,6 +1940,7 @@ def speak_page():
     const qs = force ? '?force=1' : '';
     const data = await api('/ui/voices' + qs, 'GET');
     const voices = (data.voices || []).filter(v => v && v.voice_id && v.name);
+    cachedVoices = voices;
     const sel = $("voice");
     sel.innerHTML = '';
     voices.forEach(v => {
@@ -1673,6 +1952,34 @@ def speak_page():
     const checkedAt = data.checked_at ? ` (cached: ${data.checked_at})` : '';
     $("voiceHint").textContent = voices.length ? `Loaded ${voices.length} voice(s)${checkedAt}` : `No voices returned${checkedAt}`;
     return voices;
+  }
+
+  async function loadPhrases(){
+    const data = await api('/ui/phrases', 'GET');
+    return (data.phrases || []).filter(p => p && p.id && (p.text || ''));
+  }
+
+  function renderPhrases(list){
+    const el = $("phrases");
+    el.innerHTML = '';
+    list.forEach(p => {
+      const b = document.createElement('button');
+      b.className = 'phraseBtn';
+      b.textContent = p.label || p.id;
+      b.addEventListener('click', () => {
+        $("text").value = p.text || '';
+        $("phraseLabel").value = p.label || '';
+        setSelectedPhrase(p.id);
+        setPhraseStatus(`Selected ${p.label || p.id}`);
+      });
+      el.appendChild(b);
+    });
+    if (!list.length) {
+      const span = document.createElement('div');
+      span.className = 'muted small';
+      span.textContent = 'No saved phrases yet.';
+      el.appendChild(span);
+    }
   }
 
   async function refreshAll(forceVoices){
@@ -1687,14 +1994,27 @@ def speak_page():
     if (prefs.voice_id) {
       $("voice").value = prefs.voice_id;
     }
+    // Set friendlyName input for selected device
+    const curDid = $("device").value || '';
+    const curDev = cachedDevices.find(x => (x.device_id||'') === curDid);
+    $("friendlyName").value = (curDev && curDev.friendly_name) ? String(curDev.friendly_name) : '';
 
     // If pref not present or invalid, just keep first option.
     savePrefs();
+    applyDeviceDefaultVoice();
     setStatus('Ready');
     log(`Loaded devices=${devices.length}, voices=${voices.length}`);
+
+    const phrases = await loadPhrases();
+    renderPhrases(phrases);
+    setSelectedPhrase('');
+    setPhraseStatus('');
   }
 
-  $("device").addEventListener('change', savePrefs);
+  $("device").addEventListener('change', () => {
+    savePrefs();
+    applyDeviceDefaultVoice();
+  });
   $("voice").addEventListener('change', savePrefs);
 
   $("refreshBtn").addEventListener('click', async () => {
@@ -1726,6 +2046,58 @@ def speak_page():
       log(`Speak failed: ${e.message}`);
     } finally {
       $("speakBtn").disabled = false;
+    }
+  });
+
+  $("savePhraseBtn").addEventListener('click', async () => {
+    const label = ($("phraseLabel").value || '').trim();
+    const text = ($("text").value || '').trim();
+    if (!label) { setPhraseStatus('Label is required.'); return; }
+    if (!text) { setPhraseStatus('Text is required.'); return; }
+    try {
+      setPhraseStatus('Saving…');
+      const body = { label, text };
+      if (selectedPhraseId) body.id = selectedPhraseId;
+      const r = await api('/ui/phrases', 'POST', body);
+      setSelectedPhrase(r.id);
+      setPhraseStatus('Saved.');
+      const phrases = await loadPhrases();
+      renderPhrases(phrases);
+    } catch(e){
+      setPhraseStatus('Save failed.');
+      log(`Phrase save failed: ${e.message}`);
+    }
+  });
+
+  $("deletePhraseBtn").addEventListener('click', async () => {
+    if (!selectedPhraseId) return;
+    try {
+      setPhraseStatus('Deleting…');
+      await api('/ui/phrases/delete', 'POST', { id: selectedPhraseId });
+      setSelectedPhrase('');
+      $("phraseLabel").value = '';
+      setPhraseStatus('Deleted.');
+      const phrases = await loadPhrases();
+      renderPhrases(phrases);
+    } catch(e){
+      setPhraseStatus('Delete failed.');
+      log(`Phrase delete failed: ${e.message}`);
+    }
+  });
+
+  $("saveDeviceCfgBtn").addEventListener('click', async () => {
+    const device_id = $("device").value || '';
+    const friendly_name = ($("friendlyName").value || '').trim();
+    const default_voice_id = $("voice").value || '';
+    if (!device_id) { setDevCfgStatus('Pick a device first.'); return; }
+    try {
+      setDevCfgStatus('Saving…');
+      await api('/ui/device/config', 'POST', { device_id, friendly_name, default_voice_id });
+      setDevCfgStatus('Saved.');
+      await refreshAll(false);
+    } catch(e){
+      setDevCfgStatus('Save failed.');
+      log(`Device config save failed: ${e.message}`);
     }
   });
 
