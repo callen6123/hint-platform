@@ -1183,6 +1183,61 @@ def ui_phrases_delete():
 
     return jsonify({"ok": True, "deleted": deleted, "id": pid})
 
+
+# --- UI cancel endpoint ---
+
+@app.post("/ui/cancel")
+def ui_cancel():
+    """Send a cancel command to a device.
+
+    Body:
+      {"device_id":"...", "command_id":"optional", "ttl_sec": 300, "priority": 10}
+
+    The device agent is responsible for interpreting cancel (stop current audio and/or clear queue).
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"cancel-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="cancel",
+        params={},
+        ttl_sec=ttl_sec if ttl_sec is not None else 300,
+        priority=priority if priority is not None else 10,
+    )
+
+    try:
+        publish_command(site_id, device_id, payload)
+        _mark_sent_in_registry(reg, device_id, command_id, "cancel")
+        write_registry(reg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "device_id": device_id,
+        "command_id": command_id,
+    })
+
 # --- UI TTS speak endpoint ---
 
 @app.post("/ui/speak")
@@ -1827,6 +1882,7 @@ def speak_page():
 
     <div class="row" style="margin-top:10px;">
       <button id="speakBtn">Generate + Play</button>
+      <button id="cancelBtn" class="danger">Cancel / Stop</button>
       <button id="refreshBtn">Refresh devices/voices</button>
       <span class="muted" id="status"></span>
     </div>
@@ -2026,6 +2082,7 @@ def speak_page():
     }
   });
 
+
   $("speakBtn").addEventListener('click', async () => {
     const device_id = $("device").value || '';
     const voice_id = $("voice").value || '';
@@ -2046,6 +2103,25 @@ def speak_page():
       log(`Speak failed: ${e.message}`);
     } finally {
       $("speakBtn").disabled = false;
+    }
+  });
+
+  $("cancelBtn").addEventListener('click', async () => {
+    const device_id = $("device").value || '';
+    if (!device_id) { log('Pick a device first.'); return; }
+
+    try {
+      $("cancelBtn").disabled = true;
+      setStatus('Canceling…');
+      log(`Cancel: device=${device_id}`);
+      const r = await api('/ui/cancel', 'POST', { device_id });
+      log(`Cancel sent: ${JSON.stringify(r)}`);
+      setStatus('Cancel sent');
+    } catch(e) {
+      setStatus('Error');
+      log(`Cancel failed: ${e.message}`);
+    } finally {
+      $("cancelBtn").disabled = false;
     }
   });
 
