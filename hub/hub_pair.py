@@ -1955,6 +1955,35 @@ def speak_page():
     return data;
   }
 
+  // --- Helper to poll /ui/status for device ACK ---
+  async function getStatus(){
+    return await api('/ui/status', 'GET');
+  }
+
+  function findDeviceInStatus(status, device_id){
+    const devices = (status && status.devices) ? status.devices : [];
+    return devices.find(d => String(d.device_id || '') === String(device_id || '')) || null;
+  }
+
+  async function waitForAck(device_id, command_id, timeoutMs){
+    const start = Date.now();
+    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 8000;
+    while ((Date.now() - start) < timeout) {
+      try {
+        const st = await getStatus();
+        const dev = findDeviceInStatus(st, device_id);
+        const ack = dev && dev.last_ack ? dev.last_ack : null;
+        if (ack && String(ack.command_id || '') === String(command_id || '')) {
+          return ack;
+        }
+      } catch(e) {
+        // ignore transient errors during polling
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return null;
+  }
+
   function setStatus(s){
     $("status").textContent = s || '';
   }
@@ -2124,6 +2153,15 @@ def speak_page():
       log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
       const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
       log(`Queued: ${JSON.stringify(r)}`);
+      // --- Poll for device ACK after speak command ---
+      if (r && r.command_id) {
+        const ack = await waitForAck(device_id, r.command_id, 12000);
+        if (ack) {
+          log(`Device ACK: ${JSON.stringify(ack)}`);
+        } else {
+          log(`No ACK seen yet for ${r.command_id} (poll timeout).`);
+        }
+      }
       setStatus('Sent');
     } catch(e){
       setStatus('Error');
@@ -2144,6 +2182,15 @@ def speak_page():
       log(`Cancel: device=${device_id}, mode=${mode}`);
       const r = await api('/ui/cancel', 'POST', { device_id, mode });
       log(`Cancel sent: ${JSON.stringify(r)}`);
+      // --- Poll for device ACK after cancel command ---
+      if (r && r.command_id) {
+        const ack = await waitForAck(device_id, r.command_id, 8000);
+        if (ack) {
+          log(`Cancel ACK: ${JSON.stringify(ack)}`);
+        } else {
+          log(`No cancel ACK seen yet for ${r.command_id} (poll timeout).`);
+        }
+      }
       setStatus('Cancel sent');
     } catch(e) {
       setStatus('Error');

@@ -792,16 +792,24 @@ def main() -> None:
     c.connect(host, port, keepalive=30)
     c.loop_start()
 
-    # Heartbeat: keep a retained status so the hub can see liveness
+    # Heartbeat: keep a retained status so the hub can see liveness.
+    # We already publish immediately on state changes; this only sends a periodic refresh
+    # if nothing else has been published recently.
     while True:
         now = time.time()
-        payload = {"device_id": device_id, "status": last_state or "IDLE", "ts": int(now)}
-        payload.update(current_versions())
-        c.publish(state_t, json.dumps(payload), qos=1, retain=True)
-        last_state_publish_ts = now
-        if last_state is None:
-            last_state = "IDLE"
-        time.sleep(HEARTBEAT_SEC)
+
+        # If nothing has been published for HEARTBEAT_SEC, publish the current state.
+        if (now - last_state_publish_ts) >= HEARTBEAT_SEC:
+            if last_state is None:
+                last_state = "IDLE"
+
+            payload = {"device_id": device_id, "status": last_state, "ts": int(now)}
+            payload.update(current_versions())
+            c.publish(state_t, json.dumps(payload), qos=1, retain=True)
+            last_state_publish_ts = now
+
+        # 1s tick keeps latency low for state changes while preventing spam.
+        time.sleep(1)
 
 
 if __name__ == "__main__":
