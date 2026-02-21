@@ -428,10 +428,13 @@ def main() -> None:
         removed = 0
         stopped = False
 
-        # Stop currently playing if it matches
+        # If caller didn't specify a target, assume they want to stop whatever is playing now.
+        stop_current_anyway = (command_id is None) and (not all_jobs)
+
+        # Stop currently playing if it matches (or if no target specified)
         with q_lock:
             if current_proc is not None and current_job is not None:
-                if all_jobs or (command_id and current_job.get("command_id") == command_id):
+                if all_jobs or stop_current_anyway or (command_id and current_job.get("command_id") == command_id):
                     # Kill the active playback process (and its process group) so audio stops immediately.
                     _kill_proc(current_proc)
                     stopped = True
@@ -446,10 +449,11 @@ def main() -> None:
             except queue.Empty:
                 break
 
-            if all_jobs or (command_id and j.get("command_id") == command_id):
+            if all_jobs or stop_current_anyway or (command_id and j.get("command_id") == command_id):
                 removed += 1
                 job_q.task_done()
                 continue
+
             keep.append(j)
             job_q.task_done()
 
@@ -704,6 +708,8 @@ def main() -> None:
                     params = {}
                 target_id = params.get("command_id")
                 all_jobs = bool(params.get("all", False))
+
+                # If no target specified, default to cancelling whatever is currently playing.
                 details = cancel_jobs(command_id=str(target_id) if target_id else None, all_jobs=all_jobs)
                 publish_ack(str(cid), "completed", details)
 
