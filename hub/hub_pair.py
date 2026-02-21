@@ -1575,16 +1575,64 @@ def ui_status():
         ui_devs = {}
 
     devices = []
-    for _, rec in reg.items():
-        if isinstance(rec, dict):
-            drec = dict(rec)
-            u = ui_devs.get(str(drec.get("device_id") or ""))
-            if isinstance(u, dict):
-                if "friendly_name" in u:
-                    drec["friendly_name"] = u.get("friendly_name")
-                if "default_voice_id" in u:
-                    drec["default_voice_id"] = u.get("default_voice_id")
-            devices.append(drec)
+    changed = False
+
+    for did_key, rec in reg.items():
+        if not isinstance(rec, dict):
+            continue
+
+        # Work on the canonical registry record for this device_id
+        device_id = str(rec.get("device_id") or did_key)
+
+        # Merge UI config fields into response record
+        drec = dict(rec)
+        u = ui_devs.get(device_id)
+        if isinstance(u, dict):
+            if "friendly_name" in u:
+                drec["friendly_name"] = u.get("friendly_name")
+            if "default_voice_id" in u:
+                drec["default_voice_id"] = u.get("default_voice_id")
+
+        # --- Reconcile last_speak state with last_ack (end-to-end progress) ---
+        ls = rec.get("last_speak") if isinstance(rec.get("last_speak"), dict) else None
+        ack = rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else None
+
+        if ls and ack:
+            ls_cid = str(ls.get("command_id") or "")
+            ack_cid = str(ack.get("command_id") or "")
+            if ls_cid and ack_cid and ls_cid == ack_cid:
+                ack_status = str(ack.get("status") or "").strip().lower()
+                if ack_status:
+                    cur_state = str(ls.get("state") or "").strip().lower()
+                    if cur_state != ack_status:
+                        # Update registry and response
+                        new_ls = dict(ls)
+                        new_ls["state"] = ack_status
+                        # Best-effort: preserve ack timestamp for UI
+                        if "ts" in ack:
+                            new_ls["ack_ts"] = ack.get("ts")
+                        rec["last_speak"] = new_ls
+                        drec["last_speak"] = new_ls
+                        reg[device_id] = rec
+                        changed = True
+                    else:
+                        # Keep response consistent even if registry already correct
+                        drec["last_speak"] = ls
+                else:
+                    drec["last_speak"] = ls
+            else:
+                drec["last_speak"] = ls
+        elif ls:
+            drec["last_speak"] = ls
+
+        devices.append(drec)
+
+    # Persist only when we actually advanced last_speak.state based on ACKs
+    if changed:
+        try:
+            write_registry(reg)
+        except Exception:
+            pass
 
     devices.sort(key=lambda r: str(r.get("device_id", "")))
     ota_latest = _read_ota_latest_version()
