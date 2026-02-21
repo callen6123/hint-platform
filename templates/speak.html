@@ -1,0 +1,76 @@
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hint Hub - Speak</title>
+  <link rel="stylesheet" href="/static/hub.css" />
+</head>
+<body>
+  <header>
+    <div class="row">
+      <span class="pill">Hint Hub</span>
+      <nav>
+        <a href="/ui/speak"><b>Speak</b></a>
+        <a href="/dashboard">Updates</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label for="device">Device</label>
+        <select id="device"></select>
+        <div class="muted" id="deviceHint"></div>
+      </div>
+      <div>
+        <label for="voice">Voice</label>
+        <select id="voice"></select>
+        <div class="muted" id="voiceHint"></div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <input id="friendlyName" type="text" placeholder="Device name (optional)" />
+      <button id="saveDeviceCfgBtn">Save device settings</button>
+      <span class="muted small" id="devCfgStatus"></span>
+    </div>
+
+    <label for="text">Message</label>
+    <textarea id="text" placeholder="Type what you want the character to say…"></textarea>
+
+    <div class="row" style="margin-top:10px;">
+      <button id="speakBtn">Generate + Play</button>
+
+      <label class="small" style="margin:0;">
+        Cancel mode
+        <select id="cancelMode" style="max-width:220px; margin-left:6px;">
+          <option value="stop" selected>Stop playback</option>
+          <option value="clear_queue">Clear queue</option>
+          <option value="stop_and_clear">Stop + clear queue</option>
+        </select>
+      </label>
+
+      <button id="cancelBtn" class="danger">Cancel / Stop</button>
+      <button id="refreshBtn">Refresh devices/voices</button>
+      <span class="muted" id="status"></span>
+    </div>
+
+    <div class="panel" style="margin-top:14px;">
+      <h3 style="margin:0 0 8px 0; font-size:14px;">Saved phrases</h3>
+      <div class="row">
+        <input id="phraseLabel" type="text" placeholder="Label (e.g., Hint 1)" />
+        <button id="savePhraseBtn">Save phrase</button>
+        <button id="deletePhraseBtn" class="danger" disabled>Delete selected</button>
+        <span class="muted small" id="phraseStatus"></span>
+      </div>
+      <div class="muted small" style="margin-top:6px;">Click a phrase to load its text. Save overwrites if a phrase is selected.</div>
+      <div class="phrases" id="phrases"></div>
+    </div>
+  </div>
+
+  <div class="log" id="log"></div>
+
+
+</body>
+</html>

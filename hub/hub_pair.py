@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, abort
+from flask import Flask, request, jsonify, send_file, abort, render_template
 import os
 import sys
 import subprocess
@@ -124,7 +124,7 @@ _VOICES_CACHE: dict = {
 
 # --- Hub audio cache cleanup (retention / max files / max bytes) ---
 
-def _cleanup_audio_cache_if_needed() -> None:
+def _cleanup_audio_cache_if_needed(force: bool = False) -> None:
     """Best-effort cleanup of hub audio cache.
 
     Controlled by env vars:
@@ -141,7 +141,7 @@ def _cleanup_audio_cache_if_needed() -> None:
         last = float(getattr(_cleanup_audio_cache_if_needed, "_last_ts", 0.0))
         interval = int(os.environ.get("HINT_AUDIO_CLEANUP_INTERVAL_SEC", "300"))
         interval = max(10, min(interval, 24 * 3600))
-        if (now - last) < interval:
+        if (not force) and (now - last) < interval:
             return
         _cleanup_audio_cache_if_needed._last_ts = now  # type: ignore[attr-defined]
 
@@ -211,6 +211,82 @@ def _cleanup_audio_cache_if_needed() -> None:
 
     except Exception:
         return
+
+def _audio_cache_status() -> dict:
+    cache_dir = Path(os.environ.get("HINT_AUDIO_CACHE_DIR", "/var/lib/hint/audio_cache"))
+
+    retention_hours = int(os.environ.get("HINT_AUDIO_RETENTION_HOURS", "24"))
+    max_files = int(os.environ.get("HINT_AUDIO_MAX_FILES", "2000"))
+    max_bytes = int(os.environ.get("HINT_AUDIO_MAX_BYTES", str(512 * 1024 * 1024)))
+
+    out = {
+        "ok": True,
+        "cache_dir": str(cache_dir),
+        "policy": {
+            "retention_hours": retention_hours,
+            "max_files": max_files,
+            "max_bytes": max_bytes,
+        },
+        "stats": {
+            "files": 0,
+            "bytes": 0,
+            "oldest_mtime": None,
+            "newest_mtime": None,
+        },
+    }
+
+    try:
+        if not cache_dir.exists() or not cache_dir.is_dir():
+            out["ok"] = False
+            out["error"] = "cache_dir_missing"
+            return out
+
+        files = 0
+        total = 0
+        oldest = None
+        newest = None
+
+        for p in cache_dir.iterdir():
+            try:
+                if not p.is_file():
+                    continue
+                st = p.stat()
+                files += 1
+                total += int(st.st_size)
+                mt = float(st.st_mtime)
+                oldest = mt if oldest is None else min(oldest, mt)
+                newest = mt if newest is None else max(newest, mt)
+            except Exception:
+                continue
+
+        out["stats"]["files"] = files
+        out["stats"]["bytes"] = total
+        out["stats"]["oldest_mtime"] = datetime.fromtimestamp(oldest, tz=timezone.utc).isoformat() if oldest else None
+        out["stats"]["newest_mtime"] = datetime.fromtimestamp(newest, tz=timezone.utc).isoformat() if newest else None
+        return out
+
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = str(e)
+        return out
+
+
+@app.get("/ui/audio/status")
+def ui_audio_status():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+    return jsonify(_audio_cache_status())
+
+
+@app.post("/ui/audio/cleanup")
+def ui_audio_cleanup():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    _cleanup_audio_cache_if_needed(force=True)
+    return jsonify(_audio_cache_status())
 
 def _get_elevenlabs_voices_cached(force: bool = False) -> dict:
     """Return {ok, voices:[{voice_id,name,category,labels}], error, checked_at}."""
@@ -1992,451 +2068,12 @@ def ui_rollout_cancel():
     return jsonify({"ok": True, "job": job})
 
 
-@app.get("/speak")
-def speak_page():
+@app.get("/ui/speak")
+def ui_speak_page():
     ar = require_ui_auth()
     if ar is not None:
         return ar
-
-    html = """<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Hint Hub - Speak</title>
-    <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
-    header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-    nav a { margin-right: 10px; text-decoration: none; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
-    .panel { margin-top: 14px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
-    label { display:block; margin: 10px 0 6px; font-weight: 600; }
-    select, textarea, input[type=text] { width: 100%; max-width: 860px; padding: 8px; font-size: 14px; }
-    textarea { height: 120px; }
-    button { padding: 8px 12px; cursor: pointer; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .muted { color:#666; }
-    .log { margin-top: 12px; padding: 10px; background: #111; color: #eee; border-radius: 6px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; font-size: 12px; }
-    .phrases { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-    .phraseBtn { padding: 6px 10px; border: 1px solid #333; background: #fff; border-radius: 6px; }
-    .small { font-size: 12px; }
-    .danger { border-color:#a00; color:#a00; }
-  </style>
-</head>
-<body>
-  <header>
-    <div class=\"row\">
-      <span class=\"pill\">Hint Hub</span>
-      <nav>
-        <a href=\"/speak\"><b>Speak</b></a>
-        <a href=\"/dashboard\">Updates</a>
-      </nav>
-    </div>
-  </header>
-
-  <div class=\"panel\">
-    <div class=\"row\">
-      <div>
-        <label for=\"device\">Device</label>
-        <select id=\"device\"></select>
-        <div class=\"muted\" id=\"deviceHint\"></div>
-      </div>
-      <div>
-        <label for=\"voice\">Voice</label>
-        <select id=\"voice\"></select>
-        <div class=\"muted\" id=\"voiceHint\"></div>
-      </div>
-    </div>
-
-    <div class="row" style="margin-top:10px;">
-      <input id="friendlyName" type="text" placeholder="Device name (optional)" />
-      <button id="saveDeviceCfgBtn">Save device settings</button>
-      <span class="muted small" id="devCfgStatus"></span>
-    </div>
-
-    <label for="text">Message</label>
-    <textarea id="text" placeholder="Type what you want the character to say…"></textarea>
-
-    <div class="row" style="margin-top:10px;">
-      <button id="speakBtn">Generate + Play</button>
-
-      <label class="small" style="margin:0;">
-        Cancel mode
-        <select id="cancelMode" style="max-width:220px; margin-left:6px;">
-          <option value="stop" selected>Stop playback</option>
-          <option value="clear_queue">Clear queue</option>
-          <option value="stop_and_clear">Stop + clear queue</option>
-        </select>
-      </label>
-
-      <button id="cancelBtn" class="danger">Cancel / Stop</button>
-      <button id="refreshBtn">Refresh devices/voices</button>
-      <span class="muted" id="status"></span>
-    </div>
-
-    <div class="panel" style="margin-top:14px;">
-      <h3 style="margin:0 0 8px 0; font-size:14px;">Saved phrases</h3>
-      <div class="row">
-        <input id="phraseLabel" type="text" placeholder="Label (e.g., Hint 1)" />
-        <button id="savePhraseBtn">Save phrase</button>
-        <button id="deletePhraseBtn" class="danger" disabled>Delete selected</button>
-        <span class="muted small" id="phraseStatus"></span>
-      </div>
-      <div class="muted small" style="margin-top:6px;">Click a phrase to load its text. Save overwrites if a phrase is selected.</div>
-      <div class="phrases" id="phrases"></div>
-    </div>
-  </div>
-
-  <div class=\"log\" id=\"log\"></div>
-
-<script>
-(function(){
-  const $ = (id) => document.getElementById(id);
-  const logEl = $("log");
-
-  let cachedDevices = [];
-  let cachedVoices = [];
-  let selectedPhraseId = '';
-
-  function log(msg){
-    const ts = new Date().toISOString();
-    logEl.textContent += `[${ts}] ${msg}\n`;
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  async function api(path, method, body){
-    const opts = { method, headers: { 'Content-Type': 'application/json' } };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(path, opts);
-    const txt = await res.text();
-    let data;
-    try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
-    return data;
-  }
-
-  // --- Helper to poll /ui/status for device ACK ---
-  async function getStatus(){
-    return await api('/ui/status', 'GET');
-  }
-
-  function findDeviceInStatus(status, device_id){
-    const devices = (status && status.devices) ? status.devices : [];
-    return devices.find(d => String(d.device_id || '') === String(device_id || '')) || null;
-  }
-
-  async function waitForAck(device_id, command_id, timeoutMs){
-    const start = Date.now();
-    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 12000;
-
-    // We want the terminal ACK for a command. Devices usually emit:
-    //   accepted -> completed (or error)
-    // So we keep polling until we see a non-"accepted" status, or we time out.
-
-    let lastSeen = null;
-
-    while ((Date.now() - start) < timeout) {
-      try {
-        const st = await getStatus();
-        const dev = findDeviceInStatus(st, device_id);
-        const ack = dev && dev.last_ack ? dev.last_ack : null;
-
-        if (ack && String(ack.command_id || '') === String(command_id || '')) {
-          lastSeen = ack;
-          const status = String(ack.status || '').toLowerCase();
-
-          // Keep waiting if we only have an intermediate ACK.
-          if (status === 'accepted') {
-            // continue polling
-          } else {
-            return ack;
-          }
-        }
-      } catch(e) {
-        // ignore transient errors during polling
-      }
-      await new Promise(r => setTimeout(r, 400));
-    }
-
-    // If we timed out but we did see something (like accepted), return it.
-    return lastSeen;
-  }
-
-  function setStatus(s){
-    $("status").textContent = s || '';
-  }
-  function setDevCfgStatus(s){
-    $("devCfgStatus").textContent = s || '';
-  }
-  function setPhraseStatus(s){
-    $("phraseStatus").textContent = s || '';
-  }
-  function setSelectedPhrase(pid){
-    selectedPhraseId = pid || '';
-    const delBtn = $("deletePhraseBtn");
-    if (delBtn) delBtn.disabled = !selectedPhraseId;
-  }
-
-  function savePrefs(){
-    try {
-      localStorage.setItem('hint_voice_id', $("voice").value || '');
-      localStorage.setItem('hint_device_id', $("device").value || '');
-    } catch {}
-  }
-
-  function loadPrefs(){
-    try {
-      return {
-        voice_id: localStorage.getItem('hint_voice_id') || '',
-        device_id: localStorage.getItem('hint_device_id') || '',
-      };
-    } catch {
-      return { voice_id:'', device_id:'' };
-    }
-  }
-
-  function applyDeviceDefaultVoice(){
-    const did = $("device").value || '';
-    const d = cachedDevices.find(x => (x.device_id || '') === did);
-    const dv = d && d.default_voice_id ? String(d.default_voice_id) : '';
-    if (!dv) return;
-    // Only set if voice exists
-    const has = cachedVoices.some(v => String(v.voice_id) === dv);
-    if (has) {
-      $("voice").value = dv;
-      savePrefs();
-    }
-  }
-
-  async function loadDevices(){
-    const data = await api('/ui/status', 'GET');
-    const devices = (data.devices || []).filter(d => d && d.device_id);
-    cachedDevices = devices;
-    const sel = $("device");
-    sel.innerHTML = '';
-    devices.forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.device_id;
-      const st = d.status || 'unknown';
-      const fn = d.friendly_name ? String(d.friendly_name).trim() : '';
-      opt.textContent = fn ? `${fn} — ${d.device_id} (${st})` : `${d.device_id} (${st})`;
-      sel.appendChild(opt);
-    });
-    $("deviceHint").textContent = devices.length ? '' : 'No devices paired yet.';
-    return devices;
-  }
-
-  async function loadVoices(force){
-    const qs = force ? '?force=1' : '';
-    const data = await api('/ui/voices' + qs, 'GET');
-    const voices = (data.voices || []).filter(v => v && v.voice_id && v.name);
-    cachedVoices = voices;
-    const sel = $("voice");
-    sel.innerHTML = '';
-    voices.forEach(v => {
-      const opt = document.createElement('option');
-      opt.value = v.voice_id;
-      opt.textContent = v.name;
-      sel.appendChild(opt);
-    });
-    const checkedAt = data.checked_at ? ` (cached: ${data.checked_at})` : '';
-    $("voiceHint").textContent = voices.length ? `Loaded ${voices.length} voice(s)${checkedAt}` : `No voices returned${checkedAt}`;
-    return voices;
-  }
-
-  async function loadPhrases(){
-    const data = await api('/ui/phrases', 'GET');
-    return (data.phrases || []).filter(p => p && p.id && (p.text || ''));
-  }
-
-  function renderPhrases(list){
-    const el = $("phrases");
-    el.innerHTML = '';
-    list.forEach(p => {
-      const b = document.createElement('button');
-      b.className = 'phraseBtn';
-      b.textContent = p.label || p.id;
-      b.addEventListener('click', () => {
-        $("text").value = p.text || '';
-        $("phraseLabel").value = p.label || '';
-        setSelectedPhrase(p.id);
-        setPhraseStatus(`Selected ${p.label || p.id}`);
-      });
-      el.appendChild(b);
-    });
-    if (!list.length) {
-      const span = document.createElement('div');
-      span.className = 'muted small';
-      span.textContent = 'No saved phrases yet.';
-      el.appendChild(span);
-    }
-  }
-
-  async function refreshAll(forceVoices){
-    setStatus('Loading…');
-    const prefs = loadPrefs();
-    const devices = await loadDevices();
-    const voices = await loadVoices(!!forceVoices);
-
-    if (prefs.device_id) {
-      $("device").value = prefs.device_id;
-    }
-    if (prefs.voice_id) {
-      $("voice").value = prefs.voice_id;
-    }
-    // Set friendlyName input for selected device
-    const curDid = $("device").value || '';
-    const curDev = cachedDevices.find(x => (x.device_id||'') === curDid);
-    $("friendlyName").value = (curDev && curDev.friendly_name) ? String(curDev.friendly_name) : '';
-
-    // If pref not present or invalid, just keep first option.
-    savePrefs();
-    applyDeviceDefaultVoice();
-    setStatus('Ready');
-    log(`Loaded devices=${devices.length}, voices=${voices.length}`);
-
-    const phrases = await loadPhrases();
-    renderPhrases(phrases);
-    setSelectedPhrase('');
-    setPhraseStatus('');
-  }
-
-  $("device").addEventListener('change', () => {
-    savePrefs();
-    applyDeviceDefaultVoice();
-  });
-  $("voice").addEventListener('change', savePrefs);
-
-  $("refreshBtn").addEventListener('click', async () => {
-    try {
-      await refreshAll(true);
-    } catch(e){
-      setStatus('Error');
-      log(`Refresh failed: ${e.message}`);
-    }
-  });
-
-
-  $("speakBtn").addEventListener('click', async () => {
-    const device_id = $("device").value || '';
-    const voice_id = $("voice").value || '';
-    const text = ($("text").value || '').trim();
-    if (!device_id) { log('Pick a device first.'); return; }
-    if (!voice_id) { log('Pick a voice first.'); return; }
-    if (!text) { log('Type a message first.'); return; }
-
-    try {
-      $("speakBtn").disabled = true;
-      setStatus('Generating…');
-      log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
-      const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
-      log(`Queued: ${JSON.stringify(r)}`);
-      // --- Poll for device ACK after speak command ---
-      if (r && r.command_id) {
-        const ack = await waitForAck(device_id, r.command_id, 45000);
-        if (ack) {
-          log(`Device ACK: ${JSON.stringify(ack)}`);
-        } else {
-          log(`No ACK seen yet for ${r.command_id} (poll timeout).`);
-        }
-      }
-      setStatus('Sent');
-    } catch(e){
-      setStatus('Error');
-      log(`Speak failed: ${e.message}`);
-    } finally {
-      $("speakBtn").disabled = false;
-    }
-  });
-
-  $("cancelBtn").addEventListener('click', async () => {
-    const device_id = $("device").value || '';
-    const mode = (document.getElementById('cancelMode')?.value || 'stop');
-    if (!device_id) { log('Pick a device first.'); return; }
-
-    try {
-      $("cancelBtn").disabled = true;
-      setStatus('Canceling…');
-      log(`Cancel: device=${device_id}, mode=${mode}`);
-      const r = await api('/ui/cancel', 'POST', { device_id, mode });
-      log(`Cancel sent: ${JSON.stringify(r)}`);
-      // --- Poll for device ACK after cancel command ---
-      if (r && r.command_id) {
-        const ack = await waitForAck(device_id, r.command_id, 15000);
-        if (ack) {
-          log(`Cancel ACK: ${JSON.stringify(ack)}`);
-        } else {
-          log(`No cancel ACK seen yet for ${r.command_id} (poll timeout).`);
-        }
-      }
-      setStatus('Cancel sent');
-    } catch(e) {
-      setStatus('Error');
-      log(`Cancel failed: ${e.message}`);
-    } finally {
-      $("cancelBtn").disabled = false;
-    }
-  });
-
-  $("savePhraseBtn").addEventListener('click', async () => {
-    const label = ($("phraseLabel").value || '').trim();
-    const text = ($("text").value || '').trim();
-    if (!label) { setPhraseStatus('Label is required.'); return; }
-    if (!text) { setPhraseStatus('Text is required.'); return; }
-    try {
-      setPhraseStatus('Saving…');
-      const body = { label, text };
-      if (selectedPhraseId) body.id = selectedPhraseId;
-      const r = await api('/ui/phrases', 'POST', body);
-      setSelectedPhrase(r.id);
-      setPhraseStatus('Saved.');
-      const phrases = await loadPhrases();
-      renderPhrases(phrases);
-    } catch(e){
-      setPhraseStatus('Save failed.');
-      log(`Phrase save failed: ${e.message}`);
-    }
-  });
-
-  $("deletePhraseBtn").addEventListener('click', async () => {
-    if (!selectedPhraseId) return;
-    try {
-      setPhraseStatus('Deleting…');
-      await api('/ui/phrases/delete', 'POST', { id: selectedPhraseId });
-      setSelectedPhrase('');
-      $("phraseLabel").value = '';
-      setPhraseStatus('Deleted.');
-      const phrases = await loadPhrases();
-      renderPhrases(phrases);
-    } catch(e){
-      setPhraseStatus('Delete failed.');
-      log(`Phrase delete failed: ${e.message}`);
-    }
-  });
-
-  $("saveDeviceCfgBtn").addEventListener('click', async () => {
-    const device_id = $("device").value || '';
-    const friendly_name = ($("friendlyName").value || '').trim();
-    const default_voice_id = $("voice").value || '';
-    if (!device_id) { setDevCfgStatus('Pick a device first.'); return; }
-    try {
-      setDevCfgStatus('Saving…');
-      await api('/ui/device/config', 'POST', { device_id, friendly_name, default_voice_id });
-      setDevCfgStatus('Saved.');
-      await refreshAll(false);
-    } catch(e){
-      setDevCfgStatus('Save failed.');
-      log(`Device config save failed: ${e.message}`);
-    }
-  });
-
-  refreshAll(false).catch(e => log(`Init failed: ${e.message}`));
-})();
-</script>
-</body>
-</html>"""
-
-    return html
+    return render_template("speak.html")
 
 # Dashboard HTML shell route
 @app.get("/dashboard")
@@ -2444,465 +2081,4 @@ def dashboard():
     ar = require_ui_auth()
     if ar is not None:
         return ar
-    # Public HTML shell; API operations are still protected by X-Api-Key.
-    html = """<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Hint Hub Dashboard</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
-    header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-    input[type=password] { padding: 6px 8px; min-width: 260px; }
-    button { padding: 6px 10px; cursor: pointer; }
-    table { border-collapse: collapse; width: 100%; margin-top: 14px; }
-    th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
-    th { position: sticky; top: 0; background: #f7f7f7; }
-    .status-online { color: #0a7; font-weight: 600; }
-    .status-offline { color: #a00; font-weight: 600; }
-    .muted { color: #666; }
-    .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .log { margin-top: 14px; padding: 10px; background: #111; color: #eee; border-radius: 6px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; font-size: 12px; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
-    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .right { margin-left: auto; }
-    .panel { margin-top: 14px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
-    .panel h3 { margin: 0 0 8px 0; font-size: 14px; }
-    .kv { display: flex; gap: 12px; flex-wrap: wrap; }
-    .kv div { padding: 2px 0; }
-    input[type=number] { padding: 6px 8px; width: 90px; }
-  </style>
-</head>
-<body>
-  <header>
-    <div class=\"controls\">
-      <span class=\"pill\">Hint Hub Dashboard</span>
-      <a href=\"/speak\" class=\"muted\" style=\"text-decoration:none;\">Speak</a>
-      <span class=\"muted\">Auto-refresh: 5s</span>
-    </div>
-    <div class=\"controls right\">
-      <button id=\"refresh\">Refresh</button>
-      <button id=\"hubUpdate\">Update Hub</button>
-      <button id=\"updateAll\">Update All</button>
-      <button id=\"buildUpdateAll\">Build+Update All</button>
-    </div>
-  </header>
-
-  <div id="banner" class="panel" style="display:none;"></div>
-
-    <div class="panel">
-    <h3>Staged Rollout</h3>
-    <div class="controls">
-      <label>Batch size: <input id="batchSize" type="number" min="1" max="50" value="5" /></label>
-      <button id="rolloutUpdateAll">Staged Update All</button>
-      <button id="rolloutBuildUpdateAll">Staged Build+Update All</button>
-      <button id="rolloutResume" disabled>Retry failed</button>
-      <button id="rolloutCancel" disabled>Cancel</button>
-      <span class="muted">Runs batches sequentially and tracks ACK completion.</span>
-    </div>
-    <div class="kv" id="rolloutStatus" style="margin-top:8px;">
-      <div class="muted">No rollout running.</div>
-    </div>
-  </div>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Device</th>
-        <th>Status</th>
-        <th>Last Seen (UTC)</th>
-        <th>Agent</th>
-        <th>Setup</th>
-        <th>Last Cmd</th>
-        <th>Last Result</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id=\"tbody\">
-      <tr><td colspan=\"8\" class=\"muted\">Loading…</td></tr>
-    </tbody>
-  </table>
-
-  <div class=\"log\" id=\"log\"></div>
-
-<script>
-(function(){
-  const $ = (id) => document.getElementById(id);
-  const logEl = $(\"log\");
-
-  function log(msg){
-    const ts = new Date().toISOString();
-    logEl.textContent += `[${ts}] ${msg}\\n`;
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  async function api(path, method, body){
-    const opts = {
-      method,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    };
-    if (body) opts.body = JSON.stringify(body);
-
-    const res = await fetch(path, opts);
-    const txt = await res.text();
-    let data;
-    try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
-    if (!res.ok) {
-      throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
-    }
-    return data;
-  }
-
-  function statusClass(s){
-    return (s === 'online') ? 'status-online' : 'status-offline';
-  }
-
-  function fmt(v){
-    return v == null ? '' : String(v);
-  }
-
-  function lastCmd(d){
-    const cid = fmt(d.last_command_id || '');
-    const st = fmt(d.last_command_status || '');
-    if (!cid && !st) return '';
-    return `${cid}${st ? ' (' + st + ')' : ''}`;
-  }
-
-  function lastResult(d){
-    const det = d.last_command_details || null;
-    if (!det || typeof det !== 'object') return '';
-    const r = fmt(det.result || '');
-    const fv = fmt(det.from_version || '');
-    const tv = fmt(det.to_version || '');
-    if (!r && !fv && !tv) return '';
-    if (fv || tv) {
-      return `${r}${fv || tv ? ' ' + fv + '→' + tv : ''}`.trim();
-    }
-    return r;
-  }
-
-  function renderBanner(info){
-    const b = $("banner");
-    if (!b) return;
-    if (!info) {
-      b.style.display = 'none';
-      b.innerHTML = '';
-      return;
-    }
-
-    const parts = [];
-    if (info.otaLatest) {
-      parts.push(`<div><b>Device OTA:</b> latest <span class="pill">${info.otaLatest}</span></div>`);
-    } else {
-      parts.push(`<div><b>Device OTA:</b> <span class="muted">no bundle built yet</span></div>`);
-    }
-
-    if (info.hubVer) {
-      const hv = `<span class="pill">${info.hubVer}</span>`;
-      if (info.hubUpd === true) {
-        const hl = info.hubLatest ? `<span class="pill">${info.hubLatest}</span>` : `<span class="muted">(unknown)</span>`;
-        parts.push(`<div><b>Hub:</b> ${hv} → ${hl} <span class="muted">(update available)</span></div>`);
-      } else if (info.hubUpd === false) {
-        parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(up to date)</span></div>`);
-      } else {
-        parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(update status unknown)</span></div>`);
-      }
-    } else {
-      parts.push(`<div><b>Hub:</b> <span class="muted">version unknown</span></div>`);
-    }
-
-    if (info.hubErr) {
-      parts.push(`<div class="muted">Hub update check error: ${String(info.hubErr)}</div>`);
-    }
-
-    b.innerHTML = `<h3 style="margin:0 0 8px 0; font-size:14px;">Updates</h3>` + parts.join('');
-    b.style.display = '';
-  }
-
-  async function refresh(){
-    try {
-      const data = await api('/ui/status', 'GET');
-      const devices = data.devices || [];
-      // Enrich end-to-end Speak progress using device last_ack
-      devices.forEach(d => {
-        try {
-          const ls = d.last_speak;
-          if (!ls || !ls.command_id) return;
-          const ack = d.last_ack;
-          if (!ack || !ack.command_id) return;
-          if (String(ack.command_id || '') !== String(ls.command_id || '')) return;
-          const st = String(ack.status || '').toLowerCase();
-          if (st) ls.state = st; // accepted/completed/error
-        } catch(e) {}
-      });
-      const otaLatest = data.ota_latest_version || null;
-      const hubVer = data.hub_version || null;
-      const hubLatest = data.hub_latest_version || null;
-      const hubUpd = (typeof data.hub_update_available === 'boolean') ? data.hub_update_available : null;
-      const hubErr = data.hub_update_error || null;
-      renderBanner({ otaLatest, hubVer, hubLatest, hubUpd, hubErr });
-      render(devices, otaLatest);
-    } catch (e) {
-      renderBanner(null);
-      render([]);
-      log(`Refresh failed: ${e.message}`);
-    }
-  }
-
-  function render(devices, otaLatest){
-    const tbody = $(\"tbody\");
-    if (!devices.length){
-      tbody.innerHTML = `<tr><td colspan=\"8\" class=\"muted\">No devices.</td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = devices.map(d => {
-      const did = fmt(d.device_id);
-      const st = fmt(d.status || 'unknown');
-      const ls = fmt(d.last_seen || '');
-      const avRaw = fmt(d.agent_version || '(unknown)');
-      const svRaw = fmt(d.setup_version || '(unknown)');
-      const needsUpdate = otaLatest && avRaw && (avRaw !== '(unknown)') && (avRaw !== String(otaLatest));
-      const av = needsUpdate ? `${avRaw} → ${otaLatest}` : avRaw;
-      const sv = svRaw;
-      const lc = lastCmd(d);
-      const lr = lastResult(d);
-      return `
-        <tr>
-          <td>
-            ${d.friendly_name ? `<div><b>${String(d.friendly_name)}</b></div>` : ``}
-            <span class=\"pill\">${did}</span>
-            ${d.last_speak && d.last_speak.command_id ? `<div class=\"muted\" style=\"margin-top:6px;\">Speak: ${String(d.last_speak.state || 'sent')}<span class=\"muted\"> (${String(d.last_speak.command_id)})</span></div>` : ``}
-          </td>
-          <td class=\"${statusClass(st)}\">${st}</td>
-          <td class=\"muted\">${ls}</td>
-          <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
-          <td>${sv}</td>
-          <td class=\"muted\">${lc}</td>
-          <td class=\"muted\">${lr}</td>
-          <td>
-            <div class=\"row-actions\">
-              <button data-action=\"update\" data-device=\"${did}\">Update</button>
-              <button data-action=\"buildUpdate\" data-device=\"${did}\">Build+Update</button>
-            </div>
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    tbody.querySelectorAll('button[data-action]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const action = btn.getAttribute('data-action');
-        const device = btn.getAttribute('data-device');
-        try {
-          btn.disabled = true;
-          if (action === 'update') {
-            log(`Updating ${device}...`);
-            const r = await api('/ui/update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
-            log(`Update result: ${JSON.stringify(r)}`);
-          } else {
-            log(`Build+Update ${device}...`);
-            const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
-            log(`Build+Update result: ${JSON.stringify(r)}`);
-          }
-          await refresh();
-        } catch (e) {
-          log(`Action failed for ${device}: ${e.message}`);
-        } finally {
-          btn.disabled = false;
-        }
-      });
-    });
-  }
-
-  // API key UI removed
-
-  let currentRolloutJobId = null;
-  let rolloutFinishedLoggedFor = null;
-
-  function renderRollout(summary){
-    const el = $("rolloutStatus");
-    if (!summary) {
-      el.innerHTML = '<div class="muted">No rollout running.</div>';
-      const resumeBtn = $("rolloutResume");
-      const cancelBtn = $("rolloutCancel");
-      if (resumeBtn) resumeBtn.disabled = true;
-      if (cancelBtn) cancelBtn.disabled = true;
-      return;
-    }
-    el.innerHTML = `
-      <div><span class="pill">Job</span> ${summary.id}</div>
-      <div><span class="pill">State</span> ${summary.state}</div>
-      <div><span class="pill">Total</span> ${summary.targets_total}</div>
-      <div><span class="pill">Pending</span> ${summary.pending}</div>
-      <div><span class="pill">In-flight</span> ${summary.in_flight}</div>
-      <div><span class="pill">Done</span> ${summary.done}</div>
-      <div><span class="pill">Updated</span> ${summary.updated ?? 0}</div>
-      <div><span class="pill">Skipped</span> ${summary.skipped ?? 0}</div>
-      <div><span class="pill">Failed</span> ${summary.failed}</div>
-      ${Array.isArray(summary.failed_summary) && summary.failed_summary.length ? `
-        <div style="flex-basis:100%"><span class="pill">Failure details</span>
-          <div class="muted" style="margin-top:4px; white-space:pre-wrap">${summary.failed_summary.map(x => `${x.device_id}: ${x.error || 'error'}`).join('\\n')}</div>
-        </div>
-      ` : ''}
-      ${summary.state === 'halted' ? `<div><span class="pill">Reason</span> ${summary.halted_reason || ''}</div>` : ''}
-      <div><span class="pill">Stop on failure</span> ${summary.stop_on_failure ? 'true' : 'false'}</div>
-      <div><span class="pill">Max failures</span> ${summary.max_failures ?? 0}</div>
-      <div><span class="pill">ACK timeout</span> ${(summary.ack_timeout_sec ?? 120)}s</div>
-    `;
-    const resumeBtn = $("rolloutResume");
-    const cancelBtn = $("rolloutCancel");
-    if (resumeBtn && cancelBtn) {
-      const st = summary.state;
-      resumeBtn.disabled = !(st === 'halted');
-      cancelBtn.disabled = !(st && st !== 'canceled' && st !== 'completed' && st !== 'completed_with_failures');
-    }
-  }
-
-  async function rolloutStatusTick(){
-    if (!currentRolloutJobId) return;
-    try {
-      const data = await api(`/ui/rollout/status?job_id=${encodeURIComponent(currentRolloutJobId)}`, 'GET');
-      renderRollout(data.summary);
-      if (data.summary && (data.summary.state === 'completed' || data.summary.state === 'completed_with_failures')) {
-        if (rolloutFinishedLoggedFor !== currentRolloutJobId) {
-          log(`Rollout finished: ${JSON.stringify(data.summary)}`);
-          rolloutFinishedLoggedFor = currentRolloutJobId;
-        }
-      }
-    } catch (e) {
-      log(`Rollout status failed: ${e.message}`);
-    }
-  }
-
-  $("rolloutUpdateAll").addEventListener('click', async () => {
-    try {
-      const bs = parseInt($("batchSize").value || '5', 10);
-      log(`Starting staged rollout (update), batch_size=${bs}...`);
-      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: false, stop_on_failure: true, max_failures: 1 });
-      currentRolloutJobId = r.job_id;
-      rolloutFinishedLoggedFor = null;
-      renderRollout(r.job ? {
-        id: r.job.id,
-        state: r.job.state,
-        targets_total: (r.job.targets||[]).length,
-        pending: (r.job.pending||[]).length,
-        in_flight: Object.keys(r.job.in_flight||{}).length,
-        done: Object.keys(r.job.done||{}).length,
-        updated: 0,
-        skipped: 0,
-        failed: Object.keys(r.job.failed||{}).length,
-        ack_timeout_sec: (r.job.ack_timeout_sec ?? 120),
-        stop_on_failure: (r.job.stop_on_failure ?? true),
-        max_failures: (r.job.max_failures ?? 1),
-      } : null);
-      log(`Rollout started: ${currentRolloutJobId}`);
-      await rolloutStatusTick();
-    } catch (e) {
-      log(`Rollout start failed: ${e.message}`);
-    }
-  });
-
-  $("rolloutBuildUpdateAll").addEventListener('click', async () => {
-    try {
-      const bs = parseInt($("batchSize").value || '5', 10);
-      log(`Starting staged rollout (build+update), batch_size=${bs}...`);
-      const r = await api('/ui/rollout/start', 'POST', { all: true, batch_size: bs, build: true, stop_on_failure: true, max_failures: 1 });
-      currentRolloutJobId = r.job_id;
-      rolloutFinishedLoggedFor = null;
-      renderRollout(r.job ? {
-        id: r.job.id,
-        state: r.job.state,
-        targets_total: (r.job.targets||[]).length,
-        pending: (r.job.pending||[]).length,
-        in_flight: Object.keys(r.job.in_flight||{}).length,
-        done: Object.keys(r.job.done||{}).length,
-        updated: 0,
-        skipped: 0,
-        failed: Object.keys(r.job.failed||{}).length,
-        ack_timeout_sec: (r.job.ack_timeout_sec ?? 120),
-        stop_on_failure: (r.job.stop_on_failure ?? true),
-        max_failures: (r.job.max_failures ?? 1),
-      } : null);
-      log(`Rollout started: ${currentRolloutJobId}`);
-      await rolloutStatusTick();
-    } catch (e) {
-      log(`Rollout start failed: ${e.message}`);
-    }
-  });
-
-  $("rolloutResume").addEventListener('click', async () => {
-    if (!currentRolloutJobId) return;
-    try {
-      log(`Resuming rollout ${currentRolloutJobId}...`);
-      await api('/ui/rollout/resume', 'POST', { job_id: currentRolloutJobId });
-      await rolloutStatusTick();
-    } catch (e) {
-      log(`Rollout resume failed: ${e.message}`);
-    }
-  });
-
-  $("rolloutCancel").addEventListener('click', async () => {
-    if (!currentRolloutJobId) return;
-    try {
-      log(`Canceling rollout ${currentRolloutJobId}...`);
-      await api('/ui/rollout/cancel', 'POST', { job_id: currentRolloutJobId });
-      await rolloutStatusTick();
-    } catch (e) {
-      log(`Rollout cancel failed: ${e.message}`);
-    }
-  });
-
-  $(\"refresh\").addEventListener('click', refresh);
-
-  $("hubUpdate").addEventListener('click', async () => {
-    try {
-      log('Starting hub update (git pull + restart services)...');
-      const r = await api('/ui/hub/update', 'POST', {});
-      log(`Hub update triggered: ${JSON.stringify(r)}`);
-      log('If hub services restart, the page may briefly fail to refresh; wait a few seconds then refresh.');
-    } catch (e) {
-      log(`Hub update failed: ${e.message}`);
-    }
-  });
-
-  $(\"updateAll\").addEventListener('click', async () => {
-    try {
-      log('Update All...');
-      const r = await api('/ui/update', 'POST', { all: true, command_id: `cmd-all-${Date.now()}` });
-      log(`Update All result: ${JSON.stringify(r)}`);
-      await refresh();
-    } catch (e) {
-      log(`Update All failed: ${e.message}`);
-    }
-  });
-
-  $(\"buildUpdateAll\").addEventListener('click', async () => {
-    try {
-      log('Build+Update All...');
-      const r = await api('/ui/build-and-update', 'POST', { all: true, command_id: `cmd-build-all-${Date.now()}` });
-      log(`Build+Update All result: ${JSON.stringify(r)}`);
-      await refresh();
-    } catch (e) {
-      log(`Build+Update All failed: ${e.message}`);
-    }
-  });
-
-  // Auto-refresh always on, no toggle
-  refresh();
-  setInterval(() => {
-    refresh();
-    rolloutStatusTick();
-  }, 5000);
-})();
-</script>
-</body>
-</html>"""
-    return html
-
-if __name__ == "__main__":
-    # 0.0.0.0 so the device can reach it on the LAN
-    app.run(host="0.0.0.0", port=5000)
+    return render_template("dashboard.html")

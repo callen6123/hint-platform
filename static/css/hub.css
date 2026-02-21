@@ -1,0 +1,20 @@
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+input[type=password] { padding: 6px 8px; min-width: 260px; }
+button { padding: 6px 10px; cursor: pointer; }
+table { border-collapse: collapse; width: 100%; margin-top: 14px; }
+th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+th { position: sticky; top: 0; background: #f7f7f7; }
+.status-online { color: #0a7; font-weight: 600; }
+.status-offline { color: #a00; font-weight: 600; }
+.muted { color: #666; }
+.row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.log { margin-top: 14px; padding: 10px; background: #111; color: #eee; border-radius: 6px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; font-size: 12px; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; }
+.controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.right { margin-left: auto; }
+.panel { margin-top: 14px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
+.panel h3 { margin: 0 0 8px 0; font-size: 14px; }
+.kv { display: flex; gap: 12px; flex-wrap: wrap; }
+.kv div { padding: 2px 0; }
+input[type=number] { padding: 6px 8px; width: 90px; }

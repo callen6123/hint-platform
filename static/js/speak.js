@@ -1,0 +1,375 @@
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+
+  let cachedDevices = [];
+  let cachedVoices = [];
+  let selectedPhraseId = '';
+
+  function log(msg){
+    const ts = new Date().toISOString();
+    logEl.textContent += `[${ts}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  async function api(path, method, body){
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(path, opts);
+    const txt = await res.text();
+    let data;
+    try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
+    return data;
+  }
+
+  // --- Helper to poll /ui/status for device ACK ---
+  async function getStatus(){
+    return await api('/ui/status', 'GET');
+  }
+
+  function findDeviceInStatus(status, device_id){
+    const devices = (status && status.devices) ? status.devices : [];
+    return devices.find(d => String(d.device_id || '') === String(device_id || '')) || null;
+  }
+
+  async function waitForAck(device_id, command_id, timeoutMs, onProgress){
+    const start = Date.now();
+    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 12000;
+
+    // We want the terminal ACK for a command. Devices usually emit:
+    //   accepted -> completed (or error)
+    // We poll /ui/status until we see a matching last_ack.
+
+    let lastSeen = null;
+    let lastStatus = null;
+
+    while ((Date.now() - start) < timeout) {
+      try {
+        const st = await getStatus();
+        const dev = findDeviceInStatus(st, device_id);
+        const ack = dev && dev.last_ack ? dev.last_ack : null;
+
+        if (ack && String(ack.command_id || '') === String(command_id || '')) {
+          lastSeen = ack;
+          const status = String(ack.status || '').toLowerCase();
+
+          // Only emit progress when status changes (avoids log spam)
+          if (status && status !== lastStatus) {
+            lastStatus = status;
+            if (typeof onProgress === 'function') {
+              try { onProgress(ack); } catch(e) {}
+            }
+          }
+
+          // Keep waiting if we only have an intermediate ACK.
+          if (status === 'accepted') {
+            // continue polling
+          } else {
+            return ack;
+          }
+        }
+      } catch(e) {
+        // ignore transient errors during polling
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    // If we timed out but we did see something (like accepted), return it.
+    return lastSeen;
+  }
+
+  function setStatus(s){
+    $("status").textContent = s || '';
+  }
+  function setDevCfgStatus(s){
+    $("devCfgStatus").textContent = s || '';
+  }
+  function setPhraseStatus(s){
+    $("phraseStatus").textContent = s || '';
+  }
+  function setSelectedPhrase(pid){
+    selectedPhraseId = pid || '';
+    const delBtn = $("deletePhraseBtn");
+    if (delBtn) delBtn.disabled = !selectedPhraseId;
+  }
+
+  function savePrefs(){
+    try {
+      localStorage.setItem('hint_voice_id', $("voice").value || '');
+      localStorage.setItem('hint_device_id', $("device").value || '');
+    } catch {}
+  }
+
+  function loadPrefs(){
+    try {
+      return {
+        voice_id: localStorage.getItem('hint_voice_id') || '',
+        device_id: localStorage.getItem('hint_device_id') || '',
+      };
+    } catch {
+      return { voice_id:'', device_id:'' };
+    }
+  }
+
+  function applyDeviceDefaultVoice(){
+    const did = $("device").value || '';
+    const d = cachedDevices.find(x => (x.device_id || '') === did);
+    const dv = d && d.default_voice_id ? String(d.default_voice_id) : '';
+    if (!dv) return;
+    // Only set if voice exists
+    const has = cachedVoices.some(v => String(v.voice_id) === dv);
+    if (has) {
+      $("voice").value = dv;
+      savePrefs();
+    }
+  }
+
+  async function loadDevices(){
+    const data = await api('/ui/status', 'GET');
+    const devices = (data.devices || []).filter(d => d && d.device_id);
+    cachedDevices = devices;
+    const sel = $("device");
+    sel.innerHTML = '';
+    devices.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.device_id;
+      const st = d.status || 'unknown';
+      const fn = d.friendly_name ? String(d.friendly_name).trim() : '';
+      opt.textContent = fn ? `${fn} — ${d.device_id} (${st})` : `${d.device_id} (${st})`;
+      sel.appendChild(opt);
+    });
+    $("deviceHint").textContent = devices.length ? '' : 'No devices paired yet.';
+    return devices;
+  }
+
+  async function loadVoices(force){
+    const qs = force ? '?force=1' : '';
+    const data = await api('/ui/voices' + qs, 'GET');
+    const voices = (data.voices || []).filter(v => v && v.voice_id && v.name);
+    cachedVoices = voices;
+    const sel = $("voice");
+    sel.innerHTML = '';
+    voices.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.voice_id;
+      opt.textContent = v.name;
+      sel.appendChild(opt);
+    });
+    const checkedAt = data.checked_at ? ` (cached: ${data.checked_at})` : '';
+    $("voiceHint").textContent = voices.length ? `Loaded ${voices.length} voice(s)${checkedAt}` : `No voices returned${checkedAt}`;
+    return voices;
+  }
+
+  async function loadPhrases(){
+    const data = await api('/ui/phrases', 'GET');
+    return (data.phrases || []).filter(p => p && p.id && (p.text || ''));
+  }
+
+  function renderPhrases(list){
+    const el = $("phrases");
+    el.innerHTML = '';
+    list.forEach(p => {
+      const b = document.createElement('button');
+      b.className = 'phraseBtn';
+      b.textContent = p.label || p.id;
+      b.addEventListener('click', () => {
+        $("text").value = p.text || '';
+        $("phraseLabel").value = p.label || '';
+        setSelectedPhrase(p.id);
+        setPhraseStatus(`Selected ${p.label || p.id}`);
+      });
+      el.appendChild(b);
+    });
+    if (!list.length) {
+      const span = document.createElement('div');
+      span.className = 'muted small';
+      span.textContent = 'No saved phrases yet.';
+      el.appendChild(span);
+    }
+  }
+
+  async function refreshAll(forceVoices){
+    setStatus('Loading…');
+    const prefs = loadPrefs();
+    const devices = await loadDevices();
+    const voices = await loadVoices(!!forceVoices);
+
+    if (prefs.device_id) {
+      $("device").value = prefs.device_id;
+    }
+    if (prefs.voice_id) {
+      $("voice").value = prefs.voice_id;
+    }
+    // Set friendlyName input for selected device
+    const curDid = $("device").value || '';
+    const curDev = cachedDevices.find(x => (x.device_id||'') === curDid);
+    $("friendlyName").value = (curDev && curDev.friendly_name) ? String(curDev.friendly_name) : '';
+
+    // If pref not present or invalid, just keep first option.
+    savePrefs();
+    applyDeviceDefaultVoice();
+    setStatus('Ready');
+    log(`Loaded devices=${devices.length}, voices=${voices.length}`);
+
+    const phrases = await loadPhrases();
+    renderPhrases(phrases);
+    setSelectedPhrase('');
+    setPhraseStatus('');
+  }
+
+  $("device").addEventListener('change', () => {
+    savePrefs();
+    applyDeviceDefaultVoice();
+  });
+  $("voice").addEventListener('change', savePrefs);
+
+  $("refreshBtn").addEventListener('click', async () => {
+    try {
+      await refreshAll(true);
+    } catch(e){
+      setStatus('Error');
+      log(`Refresh failed: ${e.message}`);
+    }
+  });
+
+
+  $("speakBtn").addEventListener('click', async () => {
+    const device_id = $("device").value || '';
+    const voice_id = $("voice").value || '';
+    const text = ($("text").value || '').trim();
+    if (!device_id) { log('Pick a device first.'); return; }
+    if (!voice_id) { log('Pick a voice first.'); return; }
+    if (!text) { log('Type a message first.'); return; }
+
+    try {
+      $("speakBtn").disabled = true;
+      setStatus('Generating…');
+      log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
+      const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
+      log(`Queued: ${JSON.stringify(r)}`);
+      // --- Poll for device ACK after speak command ---
+      if (r && r.command_id) {
+        setStatus(`Sent (command_id=${r.command_id})`);
+
+        const ack = await waitForAck(device_id, r.command_id, 45000, (a) => {
+          const st = String(a.status || '').toLowerCase();
+          log(`Device ACK: ${JSON.stringify(a)}`);
+          if (st === 'accepted') setStatus('Accepted');
+          else if (st) setStatus(st.charAt(0).toUpperCase() + st.slice(1));
+        });
+
+        if (!ack) {
+          log(`No ACK seen yet for ${r.command_id} (poll timeout).`);
+          setStatus('Sent (no ACK yet)');
+        } else {
+          const st = String(ack.status || '').toLowerCase();
+          if (st === 'completed') setStatus('Completed');
+          else if (st) setStatus(st.charAt(0).toUpperCase() + st.slice(1));
+        }
+      } else {
+        setStatus('Sent');
+      }
+    } catch(e){
+      setStatus('Error');
+      log(`Speak failed: ${e.message}`);
+    } finally {
+      $("speakBtn").disabled = false;
+    }
+  });
+
+  $("cancelBtn").addEventListener('click', async () => {
+    const device_id = $("device").value || '';
+    const mode = (document.getElementById('cancelMode')?.value || 'stop');
+    if (!device_id) { log('Pick a device first.'); return; }
+
+    try {
+      $("cancelBtn").disabled = true;
+      setStatus('Canceling…');
+      log(`Cancel: device=${device_id}, mode=${mode}`);
+      const r = await api('/ui/cancel', 'POST', { device_id, mode });
+      log(`Cancel sent: ${JSON.stringify(r)}`);
+      // --- Poll for device ACK after cancel command ---
+      if (r && r.command_id) {
+        setStatus(`Cancel sent (command_id=${r.command_id})`);
+
+        const ack = await waitForAck(device_id, r.command_id, 15000, (a) => {
+          log(`Cancel ACK: ${JSON.stringify(a)}`);
+          const st = String(a.status || '').toLowerCase();
+          if (st === 'accepted') setStatus('Cancel accepted');
+          else if (st) setStatus(`Cancel ${st}`);
+        });
+
+        if (!ack) {
+          log(`No cancel ACK seen yet for ${r.command_id} (poll timeout).`);
+          setStatus('Cancel sent (no ACK yet)');
+        } else {
+          const st = String(ack.status || '').toLowerCase();
+          if (st === 'completed') setStatus('Cancel completed');
+          else if (st) setStatus(`Cancel ${st}`);
+        }
+      } else {
+        setStatus('Cancel sent');
+      }
+    } catch(e) {
+      setStatus('Error');
+      log(`Cancel failed: ${e.message}`);
+    } finally {
+      $("cancelBtn").disabled = false;
+    }
+  });
+
+  $("savePhraseBtn").addEventListener('click', async () => {
+    const label = ($("phraseLabel").value || '').trim();
+    const text = ($("text").value || '').trim();
+    if (!label) { setPhraseStatus('Label is required.'); return; }
+    if (!text) { setPhraseStatus('Text is required.'); return; }
+    try {
+      setPhraseStatus('Saving…');
+      const body = { label, text };
+      if (selectedPhraseId) body.id = selectedPhraseId;
+      const r = await api('/ui/phrases', 'POST', body);
+      setSelectedPhrase(r.id);
+      setPhraseStatus('Saved.');
+      const phrases = await loadPhrases();
+      renderPhrases(phrases);
+    } catch(e){
+      setPhraseStatus('Save failed.');
+      log(`Phrase save failed: ${e.message}`);
+    }
+  });
+
+  $("deletePhraseBtn").addEventListener('click', async () => {
+    if (!selectedPhraseId) return;
+    try {
+      setPhraseStatus('Deleting…');
+      await api('/ui/phrases/delete', 'POST', { id: selectedPhraseId });
+      setSelectedPhrase('');
+      $("phraseLabel").value = '';
+      setPhraseStatus('Deleted.');
+      const phrases = await loadPhrases();
+      renderPhrases(phrases);
+    } catch(e){
+      setPhraseStatus('Delete failed.');
+      log(`Phrase delete failed: ${e.message}`);
+    }
+  });
+
+  $("saveDeviceCfgBtn").addEventListener('click', async () => {
+    const device_id = $("device").value || '';
+    const friendly_name = ($("friendlyName").value || '').trim();
+    const default_voice_id = $("voice").value || '';
+    if (!device_id) { setDevCfgStatus('Pick a device first.'); return; }
+    try {
+      setDevCfgStatus('Saving…');
+      await api('/ui/device/config', 'POST', { device_id, friendly_name, default_voice_id });
+      setDevCfgStatus('Saved.');
+      await refreshAll(false);
+    } catch(e){
+      setDevCfgStatus('Save failed.');
+      log(`Device config save failed: ${e.message}`);
+    }
+  });
+
+  refreshAll(false).catch(e => log(`Init failed: ${e.message}`));
+})();
