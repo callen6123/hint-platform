@@ -566,7 +566,6 @@ def main() -> None:
                         "audio_type": atype,
                     })
                     publish_state("IDLE")
-                    job_q.task_done()
                     continue
 
                 else:
