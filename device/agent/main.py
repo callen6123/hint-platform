@@ -398,8 +398,14 @@ def main() -> None:
     # --- Speak/Play job queue (single-consumer)
     job_q: "queue.Queue[dict]" = queue.Queue()
     q_lock = threading.Lock()
+
+    # Currently-playing process/job (protected by q_lock)
     current_proc: subprocess.Popen | None = None
     current_job: dict | None = None
+
+    # Playback/cancel observability
+    playback_state: str = "idle"  # idle|starting|playing|stopping
+    cancel_event = threading.Event()
 
     def _kill_proc(p: subprocess.Popen) -> None:
         try:
@@ -424,22 +430,33 @@ def main() -> None:
 
     def cancel_jobs(*, command_id: str | None = None, all_jobs: bool = False) -> dict:
         """Cancel current playback and/or queued jobs. Returns details."""
-        nonlocal current_proc, current_job
+        nonlocal current_proc, current_job, playback_state
+
         removed = 0
         stopped = False
 
         # If caller didn't specify a target, assume they want to stop whatever is playing now.
         stop_current_anyway = (command_id is None) and (not all_jobs)
 
-        # Stop currently playing if it matches (or if no target specified)
         with q_lock:
-            if current_proc is not None and current_job is not None:
-                if all_jobs or stop_current_anyway or (command_id and current_job.get("command_id") == command_id):
-                    # Kill the active playback process (and its process group) so audio stops immediately.
-                    _kill_proc(current_proc)
-                    stopped = True
-                    current_proc = None
-                    current_job = None
+            state_before = playback_state
+
+            # Signal cancellation first so worker can treat it as a clean cancel even if
+            # we're between spawn/wait.
+            should_stop_current = (
+                current_job is not None
+                and (all_jobs or stop_current_anyway or (command_id and current_job.get("command_id") == command_id))
+            )
+            if should_stop_current:
+                cancel_event.set()
+
+            if current_proc is not None and current_job is not None and should_stop_current:
+                playback_state = "stopping"
+                _kill_proc(current_proc)
+                stopped = True
+                # Do not clear current_job here; let worker finish bookkeeping.
+
+            state_after = playback_state
 
         # Drain queue and keep what we shouldn't cancel
         keep: list[dict] = []
@@ -460,90 +477,57 @@ def main() -> None:
         for j in keep:
             job_q.put(j)
 
-        return {"stopped": stopped, "removed": removed}
+        details = {
+            "stopped": stopped,
+            "removed": removed,
+            "state_before": state_before,
+            "state_after": state_after,
+        }
+        print(f"[CANCEL] target={command_id} all={all_jobs} {details}")
+        return details
 
     def enqueue_job(job: dict) -> None:
         job_q.put(job)
 
-    def _play_file_spawn(path: Path) -> subprocess.Popen:
-        """Spawn a player process for the given file and return the Popen."""
+    def _spawn_player(path: Path) -> subprocess.Popen:
+        """Spawn a player process for `path` and return the running Popen (in its own process group)."""
         cmd = _aplay_cmd_for(path)
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
 
-        # Fallbacks: try default device if a specific ALSA device fails.
-        fallbacks: list[list[str]] = []
-        if cmd and cmd[0] == "aplay":
-            if "-D" in cmd:
-                fallbacks.append(["aplay", "-D", "default", str(path)])
-            fallbacks.append(["aplay", str(path)])
-        if cmd and cmd[0] == "mpg123":
-            fallbacks.append(["mpg123", str(path)])
 
-        candidates = [cmd] + fallbacks
-
-        last_err = ""
-        last_out = ""
-        last_cmd: list[str] = []
-
-        for attempt in range(1, 6):
-            for ccmd in candidates:
-                last_cmd = ccmd
-                p = subprocess.Popen(ccmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                rc = p.wait()
-                out = (p.stdout.read() if p.stdout else "").strip()
-                err = (p.stderr.read() if p.stderr else "").strip()
-                if rc == 0:
-                    print(f"[AUDIO] played {path} via {ccmd}")
-                    # Return a completed dummy process handle is not useful; instead, return a Popen to a no-op.
-                    # We will treat playback as done when rc == 0.
-                    return subprocess.Popen(["/bin/true"])
-
-                last_err, last_out = err, out
-
-                # If the WAV is in an unsupported PCM format, try converting to 16-bit PCM WAV.
-                if ("Sample format non available" in err) and shutil.which("sox"):
-                    try:
-                        converted = path.with_suffix(".s16.wav")
-                        conv_cmd = ["sox", str(path), "-b", "16", "-e", "signed-integer", str(converted)]
-                        conv = subprocess.run(conv_cmd, capture_output=True, text=True)
-                        if conv.returncode == 0 and converted.exists():
-                            print(f"[AUDIO] converted to 16-bit PCM via {conv_cmd}: {converted}")
-                            # Try playing converted via aplay
-                            ccmd2 = _aplay_cmd_for(converted)
-                            p2 = subprocess.Popen(ccmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                            rc2 = p2.wait()
-                            out2 = (p2.stdout.read() if p2.stdout else "").strip()
-                            err2 = (p2.stderr.read() if p2.stderr else "").strip()
-                            if rc2 == 0:
-                                print(f"[AUDIO] played converted {converted} via {ccmd2}")
-                                return subprocess.Popen(["/bin/true"])
-                            if out2:
-                                print(f"[AUDIO] stdout: {out2}")
-                            if err2:
-                                print(f"[AUDIO] stderr: {err2}")
-                    except Exception as e:
-                        print(f"[AUDIO] conversion fallback failed: {e}")
-
-            print(f"[AUDIO] attempt {attempt}/5 failed cmd={last_cmd}")
-            if last_out:
-                print(f"[AUDIO] stdout: {last_out}")
-            if last_err:
-                print(f"[AUDIO] stderr: {last_err}")
-            time.sleep(0.5)
-
-        raise RuntimeError("audio_play_failed")
+    def _wait_player(p: subprocess.Popen) -> tuple[int, str, str]:
+        """Wait for player and return (rc, stdout, stderr)."""
+        rc = p.wait()
+        out = (p.stdout.read() if p.stdout else "").strip()
+        err = (p.stderr.read() if p.stderr else "").strip()
+        return rc, out, err
 
     def worker_loop() -> None:
-        nonlocal current_proc, current_job
+        nonlocal current_proc, current_job, playback_state
+
         while True:
             job = job_q.get()
             try:
-                current_job = job
+                cancel_event.clear()
+
+                with q_lock:
+                    current_job = job
+                    playback_state = "starting"
+
                 publish_state("PLAYING")
 
+                cid = str(job.get("command_id", ""))
                 jtype = job.get("type")
+
                 if jtype == "play":
-                    # simple play of local demo
-                    play_file(AUDIO_PATH)
+                    path = AUDIO_PATH
+                    atype = sniff_audio_type(path)
 
                 elif jtype == "speak":
                     url = job.get("url")
@@ -551,67 +535,81 @@ def main() -> None:
                     if not url:
                         raise RuntimeError("missing_speak_url")
 
-                    local_path = download_speak_audio(url, audio_id=str(audio_id) if audio_id else None)
-                    atype = sniff_audio_type(local_path)
-
-                    # Spawn playback so we can cancel it
-                    # Note: play_file() currently uses subprocess.run which cannot be interrupted cleanly.
-                    # We keep play_file() for non-cancellable paths; here we use Popen.
-                    cmd = _aplay_cmd_for(local_path)
-                    with q_lock:
-                        current_proc = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            start_new_session=True,
-                        )
-
-                    rc = current_proc.wait()
-                    # If we were cancelled mid-playback, current_proc may have been cleared.
-                    # In that case, treat it as cancelled.
-                    if current_proc is None:
-                        raise RuntimeError("playback_cancelled")
-                    err = (current_proc.stderr.read() if current_proc.stderr else "").strip()
-                    out = (current_proc.stdout.read() if current_proc.stdout else "").strip()
-
-                    with q_lock:
-                        current_proc = None
-
-                    if out:
-                        print(f"[AUDIO] stdout: {out}")
-                    if err:
-                        print(f"[AUDIO] stderr: {err}")
-
-                    if rc != 0:
-                        raise RuntimeError(f"audio_play_failed_rc={rc}")
-
-                    # Success
-                    publish_ack(str(job["command_id"]), "completed", {
-                        "audio_id": audio_id,
-                        "file": str(local_path),
-                        "audio_type": atype,
-                    })
-                    publish_state("IDLE")
-                    continue
+                    path = download_speak_audio(url, audio_id=str(audio_id) if audio_id else None)
+                    atype = sniff_audio_type(path)
 
                 else:
                     raise RuntimeError(f"unknown_job_type:{jtype}")
 
-                # Success for play
-                publish_ack(str(job["command_id"]), "completed")
+                # Spawn player so we can cancel it mid-playback.
+                p = _spawn_player(path)
+
+                with q_lock:
+                    current_proc = p
+                    playback_state = "playing"
+
+                # If cancel came in during the small window between job start and spawn,
+                # stop immediately and treat as cancelled.
+                if cancel_event.is_set():
+                    with q_lock:
+                        playback_state = "stopping"
+                    _kill_proc(p)
+
+                rc, out, err = _wait_player(p)
+
+                was_cancelled = cancel_event.is_set() or (rc != 0 and playback_state == "stopping")
+
+                with q_lock:
+                    current_proc = None
+                    playback_state = "idle"
+
+                if out:
+                    print(f"[AUDIO] stdout: {out}")
+                if err:
+                    print(f"[AUDIO] stderr: {err}")
+
+                if was_cancelled:
+                    # Clean cancellation outcome (not an error)
+                    details = {
+                        "cancelled": True,
+                        "rc": rc,
+                        "file": str(path),
+                        "audio_type": atype,
+                    }
+                    if jtype == "speak":
+                        details["audio_id"] = job.get("audio_id")
+                    publish_ack(cid, "completed", details)
+                    publish_state("IDLE")
+                    continue
+
+                if rc != 0:
+                    raise RuntimeError(f"audio_play_failed_rc={rc}")
+
+                # Success
+                if jtype == "speak":
+                    publish_ack(cid, "completed", {
+                        "audio_id": job.get("audio_id"),
+                        "file": str(path),
+                        "audio_type": atype,
+                    })
+                else:
+                    publish_ack(cid, "completed", {"file": str(path), "audio_type": atype})
+
                 publish_state("IDLE")
 
             except Exception as e:
+                with q_lock:
+                    playback_state = "idle"
                 publish_state("IDLE")
                 try:
                     publish_ack(str(job.get("command_id", "")), "error", {"error": str(e)})
                 except Exception:
                     pass
             finally:
-                current_job = None
                 with q_lock:
+                    current_job = None
                     current_proc = None
+                    playback_state = "idle"
                 job_q.task_done()
 
     worker = threading.Thread(target=worker_loop, name="hint-agent-worker", daemon=True)
@@ -711,6 +709,11 @@ def main() -> None:
 
                 # If no target specified, default to cancelling whatever is currently playing.
                 details = cancel_jobs(command_id=str(target_id) if target_id else None, all_jobs=all_jobs)
+                # Include current playback state snapshot
+                with q_lock:
+                    details["playback_state"] = playback_state
+                    if current_job is not None:
+                        details["current_command_id"] = current_job.get("command_id")
                 publish_ack(str(cid), "completed", details)
 
             elif cmd == "play":

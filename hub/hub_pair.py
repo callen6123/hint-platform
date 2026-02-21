@@ -1191,7 +1191,13 @@ def ui_cancel():
     """Send a cancel command to a device.
 
     Body:
-      {"device_id":"...", "command_id":"optional", "ttl_sec": 300, "priority": 10}
+      {
+        "device_id": "...",
+        "command_id": "optional",
+        "ttl_sec": 300,
+        "priority": 10,
+        "mode": one of "stop", "clear_queue", "stop_and_clear" (default "stop")
+      }
 
     The device agent is responsible for interpreting cancel (stop current audio and/or clear queue).
     """
@@ -1203,6 +1209,16 @@ def ui_cancel():
     device_id = sanitize_topic_id(str(body.get("device_id") or ""))
     if not device_id:
         return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    # Parse and validate mode
+    mode = str(body.get("mode") or "stop").strip().lower()
+    allowed_modes = ("stop", "clear_queue", "stop_and_clear")
+    if mode not in allowed_modes:
+        return jsonify({
+            "ok": False,
+            "error": "invalid_mode",
+            "allowed": list(allowed_modes),
+        }), 400
 
     reg = read_registry()
     if not isinstance(reg, dict):
@@ -1220,7 +1236,7 @@ def ui_cancel():
     payload = make_command_payload(
         command_id=command_id,
         cmd="cancel",
-        params={},
+        params={"mode": mode},
         ttl_sec=ttl_sec if ttl_sec is not None else 300,
         priority=priority if priority is not None else 10,
     )
@@ -1236,6 +1252,7 @@ def ui_cancel():
         "ok": True,
         "device_id": device_id,
         "command_id": command_id,
+        "mode": mode,
     })
 
 # --- UI TTS speak endpoint ---
@@ -1882,6 +1899,16 @@ def speak_page():
 
     <div class="row" style="margin-top:10px;">
       <button id="speakBtn">Generate + Play</button>
+
+      <label class="small" style="margin:0;">
+        Cancel mode
+        <select id="cancelMode" style="max-width:220px; margin-left:6px;">
+          <option value="stop" selected>Stop playback</option>
+          <option value="clear_queue">Clear queue</option>
+          <option value="stop_and_clear">Stop + clear queue</option>
+        </select>
+      </label>
+
       <button id="cancelBtn" class="danger">Cancel / Stop</button>
       <button id="refreshBtn">Refresh devices/voices</button>
       <span class="muted" id="status"></span>
@@ -2108,13 +2135,14 @@ def speak_page():
 
   $("cancelBtn").addEventListener('click', async () => {
     const device_id = $("device").value || '';
+    const mode = (document.getElementById('cancelMode')?.value || 'stop');
     if (!device_id) { log('Pick a device first.'); return; }
 
     try {
       $("cancelBtn").disabled = true;
       setStatus('Canceling…');
-      log(`Cancel: device=${device_id}`);
-      const r = await api('/ui/cancel', 'POST', { device_id });
+      log(`Cancel: device=${device_id}, mode=${mode}`);
+      const r = await api('/ui/cancel', 'POST', { device_id, mode });
       log(`Cancel sent: ${JSON.stringify(r)}`);
       setStatus('Cancel sent');
     } catch(e) {
