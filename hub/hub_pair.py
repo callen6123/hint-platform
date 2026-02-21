@@ -2082,3 +2082,16 @@ def dashboard():
     if ar is not None:
         return ar
     return render_template("dashboard.html")
+
+
+if __name__ == "__main__":
+    # When launched via systemd ExecStart=/usr/bin/python3 .../hub_pair.py
+    # we must explicitly start the Flask dev server.
+    host = (os.environ.get("HUB_BIND") or "0.0.0.0").strip()
+    try:
+        port = int(os.environ.get("HUB_PORT") or "5000")
+    except Exception:
+        port = 5000
+
+    # Never enable the reloader under systemd (it will fork/re-exec and confuse service state)
+    app.run(host=host, port=port, debug=False, use_reloader=False)
