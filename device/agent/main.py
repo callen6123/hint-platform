@@ -428,25 +428,36 @@ def main() -> None:
         except Exception:
             pass
 
-    def cancel_jobs(*, command_id: str | None = None, all_jobs: bool = False) -> dict:
-        """Cancel current playback and/or queued jobs. Returns details."""
+    def cancel_jobs(*, mode: str = "stop", command_id: str | None = None) -> dict:
+        """Cancel playback and/or queued jobs.
+
+        Modes:
+          - stop: stop current playback only
+          - clear_queue: remove queued jobs only
+          - stop_and_clear: stop current playback and remove queued jobs
+
+        Back-compat: if command_id is provided, we will try to stop that command_id
+        if it is currently playing, and remove matching queued jobs.
+        """
         nonlocal current_proc, current_job, playback_state
+
+        mode = (mode or "stop").strip().lower()
+        if mode not in {"stop", "clear_queue", "stop_and_clear"}:
+            mode = "stop"
 
         removed = 0
         stopped = False
 
-        # If caller didn't specify a target, assume they want to stop whatever is playing now.
-        stop_current_anyway = (command_id is None) and (not all_jobs)
-
         with q_lock:
             state_before = playback_state
 
-            # Signal cancellation first so worker can treat it as a clean cancel even if
-            # we're between spawn/wait.
-            should_stop_current = (
-                current_job is not None
-                and (all_jobs or stop_current_anyway or (command_id and current_job.get("command_id") == command_id))
-            )
+            should_stop_current = False
+            if current_job is not None:
+                if command_id and current_job.get("command_id") == command_id:
+                    should_stop_current = True
+                elif mode in {"stop", "stop_and_clear"}:
+                    should_stop_current = True
+
             if should_stop_current:
                 cancel_event.set()
 
@@ -454,11 +465,10 @@ def main() -> None:
                 playback_state = "stopping"
                 _kill_proc(current_proc)
                 stopped = True
-                # Do not clear current_job here; let worker finish bookkeeping.
 
             state_after = playback_state
 
-        # Drain queue and keep what we shouldn't cancel
+        # Drain queue; optionally remove jobs depending on mode/command_id.
         keep: list[dict] = []
         while True:
             try:
@@ -466,7 +476,17 @@ def main() -> None:
             except queue.Empty:
                 break
 
-            if all_jobs or stop_current_anyway or (command_id and j.get("command_id") == command_id):
+            remove_this = False
+
+            if command_id:
+                # Targeted cancel: remove only matching queued jobs.
+                remove_this = (j.get("command_id") == command_id)
+            else:
+                # Mode-based cancel.
+                if mode in {"clear_queue", "stop_and_clear"}:
+                    remove_this = True
+
+            if remove_this:
                 removed += 1
                 job_q.task_done()
                 continue
@@ -478,12 +498,14 @@ def main() -> None:
             job_q.put(j)
 
         details = {
+            "mode": mode,
+            "target_command_id": command_id,
             "stopped": stopped,
             "removed": removed,
             "state_before": state_before,
             "state_after": state_after,
         }
-        print(f"[CANCEL] target={command_id} all={all_jobs} {details}")
+        print(f"[CANCEL] {details}")
         return details
 
     def enqueue_job(job: dict) -> None:
@@ -704,16 +726,31 @@ def main() -> None:
                 params = d.get("params")
                 if not isinstance(params, dict):
                     params = {}
-                target_id = params.get("command_id")
-                all_jobs = bool(params.get("all", False))
 
-                # If no target specified, default to cancelling whatever is currently playing.
-                details = cancel_jobs(command_id=str(target_id) if target_id else None, all_jobs=all_jobs)
+                # New API: params.mode in {stop, clear_queue, stop_and_clear}
+                mode = params.get("mode")
+
+                # Back-compat:
+                # - params.all=true => stop_and_clear
+                # - params.command_id=<id> => targeted cancel
+                target_id = params.get("command_id")
+                if mode is None:
+                    if bool(params.get("all", False)):
+                        mode = "stop_and_clear"
+                    else:
+                        mode = "stop"
+
+                details = cancel_jobs(
+                    mode=str(mode) if mode else "stop",
+                    command_id=str(target_id) if target_id else None,
+                )
+
                 # Include current playback state snapshot
                 with q_lock:
                     details["playback_state"] = playback_state
                     if current_job is not None:
                         details["current_command_id"] = current_job.get("command_id")
+
                 publish_ack(str(cid), "completed", details)
 
             elif cmd == "play":
