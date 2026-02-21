@@ -122,6 +122,96 @@ _VOICES_CACHE: dict = {
     "error": None,
 }
 
+# --- Hub audio cache cleanup (retention / max files / max bytes) ---
+
+def _cleanup_audio_cache_if_needed() -> None:
+    """Best-effort cleanup of hub audio cache.
+
+    Controlled by env vars:
+      - HINT_AUDIO_RETENTION_HOURS (default 24)
+      - HINT_AUDIO_MAX_FILES (default 2000)
+      - HINT_AUDIO_MAX_BYTES (default 536870912 = 512MB)
+      - HINT_AUDIO_CLEANUP_INTERVAL_SEC (default 300)
+      - HINT_AUDIO_CACHE_DIR (default /var/lib/hint/audio_cache)
+
+    NOTE: This runs in-process (Flask). It is best-effort and never raises.
+    """
+    try:
+        now = time.time()
+        last = float(getattr(_cleanup_audio_cache_if_needed, "_last_ts", 0.0))
+        interval = int(os.environ.get("HINT_AUDIO_CLEANUP_INTERVAL_SEC", "300"))
+        interval = max(10, min(interval, 24 * 3600))
+        if (now - last) < interval:
+            return
+        _cleanup_audio_cache_if_needed._last_ts = now  # type: ignore[attr-defined]
+
+        cache_dir = Path(os.environ.get("HINT_AUDIO_CACHE_DIR", "/var/lib/hint/audio_cache"))
+        if not cache_dir.exists() or not cache_dir.is_dir():
+            return
+
+        retention_hours = int(os.environ.get("HINT_AUDIO_RETENTION_HOURS", "24"))
+        retention_hours = max(1, min(retention_hours, 24 * 30))  # cap at 30 days
+        cutoff = now - (retention_hours * 3600)
+
+        max_files = int(os.environ.get("HINT_AUDIO_MAX_FILES", "2000"))
+        max_files = max(0, min(max_files, 200000))
+
+        max_bytes = int(os.environ.get("HINT_AUDIO_MAX_BYTES", str(512 * 1024 * 1024)))
+        max_bytes = max(0, max_bytes)
+
+        files: list[tuple[float, int, Path]] = []
+        total_bytes = 0
+
+        # First pass: delete expired by mtime, collect survivors
+        for p in cache_dir.iterdir():
+            try:
+                if not p.is_file():
+                    continue
+                st = p.stat()
+                mtime = float(st.st_mtime)
+                size = int(st.st_size)
+
+                if mtime < cutoff:
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+                    continue
+
+                files.append((mtime, size, p))
+                total_bytes += size
+            except Exception:
+                continue
+
+        # Oldest first
+        files.sort(key=lambda t: t[0])
+
+        # Enforce max_files
+        if max_files > 0 and len(files) > max_files:
+            to_delete = len(files) - max_files
+            for i in range(to_delete):
+                try:
+                    _mtime, _size, fp = files[i]
+                    total_bytes -= int(_size)
+                    fp.unlink()
+                except Exception:
+                    pass
+            files = files[to_delete:]
+
+        # Enforce max_bytes
+        if max_bytes > 0 and total_bytes > max_bytes:
+            for _mtime, _size, fp in files:
+                if total_bytes <= max_bytes:
+                    break
+                try:
+                    total_bytes -= int(_size)
+                    fp.unlink()
+                except Exception:
+                    pass
+
+    except Exception:
+        return
+
 def _get_elevenlabs_voices_cached(force: bool = False) -> dict:
     """Return {ok, voices:[{voice_id,name,category,labels}], error, checked_at}."""
     now = time.time()
@@ -1368,6 +1458,9 @@ def ui_speak():
     except Exception as e:
         return jsonify({"ok": False, "error": f"audio_store_failed:{e}"}), 500
 
+    # Best-effort cleanup of hub audio cache (does not raise)
+    _cleanup_audio_cache_if_needed()
+
     audio_id = None
     if isinstance(stored, str):
         audio_id = stored
@@ -1400,6 +1493,25 @@ def ui_speak():
     ttl_sec = body.get("ttl_sec")
     priority = body.get("priority")
 
+    # Track speak progress for the dashboard (end-to-end)
+    try:
+        rec_last_speak = {
+            "command_id": command_id,
+            "issued_at": int(time.time()),
+            "sent_at": None,
+            "state": "generated",  # generated -> sent -> accepted/completed/error (from last_ack)
+            "text": text[:200],
+            "voice_id": str(tts_opts.get("voice_id") or "")[:128],
+            "ext": ext,
+            "audio_id": audio_id,
+        }
+        rec["last_speak"] = rec_last_speak
+        reg[device_id] = rec
+        # Write now so the dashboard can show the job even if MQTT publish fails.
+        write_registry(reg)
+    except Exception:
+        pass
+
     payload = make_command_payload(
         command_id=command_id,
         cmd="speak",
@@ -1416,7 +1528,26 @@ def ui_speak():
     try:
         publish_command(site_id, device_id, payload)
         _mark_sent_in_registry(reg, device_id, command_id, "speak")
+
+        # Mark last_speak as sent (dashboard uses this + last_ack to show progress)
+        try:
+            rec2 = reg.get(device_id)
+            if isinstance(rec2, dict):
+                ls = rec2.get("last_speak")
+                if isinstance(ls, dict) and str(ls.get("command_id") or "") == command_id:
+                    ls = dict(ls)
+                    ls["sent_at"] = int(time.time())
+                    ls["state"] = "sent"
+                    rec2["last_speak"] = ls
+                    reg[device_id] = rec2
+        except Exception:
+            pass
+
         write_registry(reg)
+
+        # Best-effort cleanup of hub audio cache after storing/serving audio
+        _cleanup_audio_cache_if_needed()
+
     except Exception as e:
         return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
 
@@ -2429,6 +2560,18 @@ def dashboard():
     try {
       const data = await api('/ui/status', 'GET');
       const devices = data.devices || [];
+      // Enrich end-to-end Speak progress using device last_ack
+      devices.forEach(d => {
+        try {
+          const ls = d.last_speak;
+          if (!ls || !ls.command_id) return;
+          const ack = d.last_ack;
+          if (!ack || !ack.command_id) return;
+          if (String(ack.command_id || '') !== String(ls.command_id || '')) return;
+          const st = String(ack.status || '').toLowerCase();
+          if (st) ls.state = st; // accepted/completed/error
+        } catch(e) {}
+      });
       const otaLatest = data.ota_latest_version || null;
       const hubVer = data.hub_version || null;
       const hubLatest = data.hub_latest_version || null;
@@ -2466,6 +2609,7 @@ def dashboard():
           <td>
             ${d.friendly_name ? `<div><b>${String(d.friendly_name)}</b></div>` : ``}
             <span class=\"pill\">${did}</span>
+            ${d.last_speak && d.last_speak.command_id ? `<div class=\"muted\" style=\"margin-top:6px;\">Speak: ${String(d.last_speak.state || 'sent')}<span class=\"muted\"> (${String(d.last_speak.command_id)})</span></div>` : ``}
           </td>
           <td class=\"${statusClass(st)}\">${st}</td>
           <td class=\"muted\">${ls}</td>
