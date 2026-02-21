@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_file, abort, render_template
+from jinja2 import ChoiceLoader, FileSystemLoader
 import os
 import sys
 import subprocess
@@ -41,17 +42,29 @@ except Exception:
     except Exception:
         tts = None
 
-# Explicitly point Flask at repo-root templates/static so the service works
-# regardless of current working directory or whether this file is executed as a script.
-TEMPLATES_DIR = str(REPO_ROOT / "templates")
+# Explicitly point Flask/Jinja at templates/static so the service works
+# regardless of current working directory or where the folders are placed.
+# We support BOTH layouts:
+#   - repo root:   <repo>/templates and <repo>/static
+#   - hub module:  <repo>/hub/templates and <repo>/hub/static
+TEMPLATES_DIRS = [
+    str(REPO_ROOT / "templates"),
+    str(REPO_ROOT / "hub" / "templates"),
+]
 STATIC_DIR = str(REPO_ROOT / "static")
+HUB_STATIC_DIR = str(REPO_ROOT / "hub" / "static")
+
+# Prefer repo-root static if present, otherwise hub/static.
+_static_dir = STATIC_DIR if Path(STATIC_DIR).is_dir() else HUB_STATIC_DIR
 
 app = Flask(
     __name__,
-    template_folder=TEMPLATES_DIR,
-    static_folder=STATIC_DIR,
+    static_folder=_static_dir,
     static_url_path="/static",
 )
+
+# Allow Jinja to search multiple template directories.
+app.jinja_loader = ChoiceLoader([FileSystemLoader(p) for p in TEMPLATES_DIRS])
 
 # Register audio blueprint if available
 if audio_bp is not None:
