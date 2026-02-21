@@ -4,6 +4,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hint Hub - Speak</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/speak.css') }}" />
 </head>
 <body>
   <header>
@@ -38,6 +39,9 @@
 
     <label for="text">Message</label>
     <textarea id="text" placeholder="Type what you want the character to say…"></textarea>
+    <div class="help-row">
+      <div class="muted"><span id="charCount">0</span> characters</div>
+    </div>
 
     <div class="row" style="margin-top:10px;">
       <button id="speakBtn">Generate + Play</button>
@@ -54,6 +58,13 @@
       <button id="cancelBtn" class="danger">Cancel / Stop</button>
       <button id="refreshBtn">Refresh devices/voices</button>
       <span class="muted" id="status"></span>
+    </div>
+    <div id="speakProgress" class="progress-panel" aria-live="polite">
+      <div class="progress-line">
+        <span class="label">Status:</span>
+        <span id="speakStatus" class="status">Idle</span>
+      </div>
+      <div class="progress-line muted" id="speakMeta"></div>
     </div>
 
     <div class="panel" style="margin-top:14px;">

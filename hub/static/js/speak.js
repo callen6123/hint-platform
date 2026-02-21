@@ -82,6 +82,39 @@
   function setStatus(s){
     $("status").textContent = s || '';
   }
+
+  function updateCharCount(){
+    const ta = $("text");
+    const cc = $("charCount");
+    if (!ta || !cc) return;
+    cc.textContent = String((ta.value || '').length);
+  }
+
+  function setSpeakProgress(state, meta){
+    const statusEl = $("speakStatus");
+    const metaEl = $("speakMeta");
+    const panel = $("speakProgress");
+    if (!statusEl || !metaEl) return;
+
+    const labels = {
+      idle: 'Idle',
+      generated: 'Generated',
+      sent: 'Sent',
+      accepted: 'Accepted',
+      completed: 'Completed',
+      error: 'Error'
+    };
+
+    statusEl.textContent = labels[state] || state || 'Idle';
+    statusEl.className = 'status ' + (state || 'idle');
+    metaEl.textContent = meta || '';
+
+    if (state === 'completed' && panel) {
+      panel.classList.add('flash-ok');
+      setTimeout(() => panel.classList.remove('flash-ok'), 1000);
+    }
+  }
+
   function setDevCfgStatus(s){
     $("devCfgStatus").textContent = s || '';
   }
@@ -245,18 +278,25 @@
     try {
       $("speakBtn").disabled = true;
       setStatus('Generating…');
+      setSpeakProgress('generated', 'Generating audio…');
       log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
       const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
       log(`Queued: ${JSON.stringify(r)}`);
       // --- Poll for device ACK after speak command ---
       if (r && r.command_id) {
         setStatus(`Sent (command_id=${r.command_id})`);
+        setSpeakProgress('sent', `Command ID: ${r.command_id}`);
 
         const ack = await waitForAck(device_id, r.command_id, 45000, (a) => {
           const st = String(a.status || '').toLowerCase();
           log(`Device ACK: ${JSON.stringify(a)}`);
-          if (st === 'accepted') setStatus('Accepted');
-          else if (st) setStatus(st.charAt(0).toUpperCase() + st.slice(1));
+          if (st === 'accepted') {
+            setStatus('Accepted');
+            setSpeakProgress('accepted', `Command ID: ${r.command_id}`);
+          } else if (st) {
+            setStatus(st.charAt(0).toUpperCase() + st.slice(1));
+            setSpeakProgress(st, `Command ID: ${r.command_id}`);
+          }
         });
 
         if (!ack) {
@@ -264,14 +304,20 @@
           setStatus('Sent (no ACK yet)');
         } else {
           const st = String(ack.status || '').toLowerCase();
-          if (st === 'completed') setStatus('Completed');
-          else if (st) setStatus(st.charAt(0).toUpperCase() + st.slice(1));
+          if (st === 'completed') {
+            setStatus('Completed');
+            setSpeakProgress('completed', `Command ID: ${r.command_id}`);
+          } else if (st) {
+            setStatus(st.charAt(0).toUpperCase() + st.slice(1));
+            setSpeakProgress(st, `Command ID: ${r.command_id}`);
+          }
         }
       } else {
         setStatus('Sent');
       }
     } catch(e){
       setStatus('Error');
+      setSpeakProgress('error', e.message);
       log(`Speak failed: ${e.message}`);
     } finally {
       $("speakBtn").disabled = false;
@@ -306,7 +352,7 @@
         } else {
           const st = String(ack.status || '').toLowerCase();
           if (st === 'completed') setStatus('Cancel completed');
-          else if (st) setStatus(`Cancel ${st}`);
+          else setStatus(`Cancel ${st}`);
         }
       } else {
         setStatus('Cancel sent');
@@ -370,6 +416,12 @@
       log(`Device config save failed: ${e.message}`);
     }
   });
+
+  const textArea = $("text");
+  if (textArea) {
+    textArea.addEventListener('input', updateCharCount);
+    updateCharCount();
+  }
 
   refreshAll(false).catch(e => log(`Init failed: ${e.message}`));
 })();
