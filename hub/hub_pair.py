@@ -41,7 +41,17 @@ except Exception:
     except Exception:
         tts = None
 
-app = Flask(__name__)
+# Explicitly point Flask at repo-root templates/static so the service works
+# regardless of current working directory or whether this file is executed as a script.
+TEMPLATES_DIR = str(REPO_ROOT / "templates")
+STATIC_DIR = str(REPO_ROOT / "static")
+
+app = Flask(
+    __name__,
+    template_folder=TEMPLATES_DIR,
+    static_folder=STATIC_DIR,
+    static_url_path="/static",
+)
 
 # Register audio blueprint if available
 if audio_bp is not None:
@@ -2068,7 +2078,7 @@ def ui_rollout_cancel():
     return jsonify({"ok": True, "job": job})
 
 
-@app.get("/ui/speak")
+@app.get("/speak")
 def ui_speak_page():
     ar = require_ui_auth()
     if ar is not None:

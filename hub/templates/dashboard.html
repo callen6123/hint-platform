@@ -3,8 +3,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hint Hub Dashboard</title>
-  <link rel="stylesheet" href="/static/hub.css" />
-  <script defer src="/static/dashboard.js"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}" />
+  <script defer src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </head>
 <body>
   <header>
@@ -21,55 +21,55 @@
       <button id="buildUpdateAll">Build+Update All</button>
     </div>
   </header>
-<main>
-  <div id="banner" class="panel" style="display:none;"></div>
+  <main>
+    <div id="banner" class="panel" style="display:none;"></div>
 
     <div class="panel">
-    <h3>Staged Rollout</h3>
-    <div class="controls">
-      <label>Batch size: <input id="batchSize" type="number" min="1" max="50" value="5" /></label>
-      <button id="rolloutUpdateAll">Staged Update All</button>
-      <button id="rolloutBuildUpdateAll">Staged Build+Update All</button>
-      <button id="rolloutResume" disabled>Retry failed</button>
-      <button id="rolloutCancel" disabled>Cancel</button>
-      <span class="muted">Runs batches sequentially and tracks ACK completion.</span>
+      <h3>Staged Rollout</h3>
+      <div class="controls">
+        <label>Batch size: <input id="batchSize" type="number" min="1" max="50" value="5" /></label>
+        <button id="rolloutUpdateAll">Staged Update All</button>
+        <button id="rolloutBuildUpdateAll">Staged Build+Update All</button>
+        <button id="rolloutResume" disabled>Retry failed</button>
+        <button id="rolloutCancel" disabled>Cancel</button>
+        <span class="muted">Runs batches sequentially and tracks ACK completion.</span>
+      </div>
+      <div class="kv" id="rolloutStatus" style="margin-top:8px;">
+        <div class="muted">No rollout running.</div>
+      </div>
     </div>
-    <div class="kv" id="rolloutStatus" style="margin-top:8px;">
-      <div class="muted">No rollout running.</div>
-    </div>
-  </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th>Device</th>
-        <th>Status</th>
-        <th>Last Seen (UTC)</th>
-        <th>Agent</th>
-        <th>Setup</th>
-        <th>Last Cmd</th>
-        <th>Last Result</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="tbody">
-      <tr><td colspan="8" class="muted">Loading…</td></tr>
-    </tbody>
-  </table>
-<div class="panel" id="audioPanel">
-  <h3>Hub Audio Cache</h3>
-  <div class="kv" id="audioKv">
-    <div><span class="muted">Dir:</span> <span id="audioDir"></span></div>
-    <div><span class="muted">Files:</span> <span id="audioFiles"></span></div>
-    <div><span class="muted">Bytes:</span> <span id="audioBytes"></span></div>
-    <div><span class="muted">Oldest:</span> <span id="audioOldest"></span></div>
-    <div><span class="muted">Policy:</span> <span id="audioPolicy"></span></div>
-  </div>
-  <div class="muted" id="audioErr" style="margin-top:6px;"></div>
-</div>
-</main>
+    <table>
+      <thead>
+        <tr>
+          <th>Device</th>
+          <th>Status</th>
+          <th>Last Seen (UTC)</th>
+          <th>Agent</th>
+          <th>Setup</th>
+          <th>Last Cmd</th>
+          <th>Last Result</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td colspan="8" class="muted">Loading…</td></tr>
+      </tbody>
+    </table>
+
+    <div class="panel" id="audioPanel">
+      <h3>Hub Audio Cache</h3>
+      <div class="kv" id="audioKv">
+        <div><span class="muted">Dir:</span> <span id="audioDir"></span></div>
+        <div><span class="muted">Files:</span> <span id="audioFiles"></span></div>
+        <div><span class="muted">Bytes:</span> <span id="audioBytes"></span></div>
+        <div><span class="muted">Oldest:</span> <span id="audioOldest"></span></div>
+        <div><span class="muted">Policy:</span> <span id="audioPolicy"></span></div>
+      </div>
+      <div class="muted" id="audioErr" style="margin-top:6px;"></div>
+    </div>
+  </main>
+
   <div class="log" id="log"></div>
-
-
 </body>
 </html>
