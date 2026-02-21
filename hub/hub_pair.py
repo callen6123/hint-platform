@@ -55,6 +55,45 @@ PAIR_CODE = "483921"  # you will type this into the device setup page
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
+
+# --- Registry and config helpers (atomic, no sudo) ---
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Atomically write JSON to `path` without using sudo.
+
+    This assumes the service user (hub) has write permission to the target directory.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    tmp.write_text(payload, encoding="utf-8")
+
+    # Best-effort permissions; if the service user lacks permission this will raise.
+    try:
+        os.chmod(tmp, 0o664)
+    except Exception:
+        pass
+
+    os.replace(tmp, path)
+
+    try:
+        os.chmod(path, 0o664)
+    except Exception:
+        pass
+
+
+def _read_json_file(path: Path, default: dict) -> dict:
+    try:
+        txt = path.read_text(encoding="utf-8").strip()
+        if not txt:
+            return dict(default)
+        d = json.loads(txt)
+        return d if isinstance(d, dict) else dict(default)
+    except FileNotFoundError:
+        return dict(default)
+    except Exception:
+        return dict(default)
 OTA_DIR = Path("/opt/hint/ota")
 BUILD_OTA_SCRIPT = Path("/home/hub/hint-platform/hub/build_ota.py")
 
@@ -346,16 +385,13 @@ topic write {base}/state
 
     # Append only if this user is not already present
     if os.path.exists(acl_file):
-        # Read via sudo in case the file is not readable by the service user.
-        res = subprocess.run(
-            ["sudo", "cat", acl_file],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-        )
-        if f"user {username}" in res.stdout:
-            return
+        try:
+            txt = Path(acl_file).read_text(encoding="utf-8", errors="replace")
+            if f"user {username}" in txt:
+                return
+        except Exception:
+            # If unreadable, proceed to append (tee runs under sudo below).
+            pass
 
     subprocess.run(
         ["sudo", "tee", "-a", acl_file],
@@ -368,62 +404,28 @@ def restart_mosquitto() -> None:
     subprocess.run(["sudo", "systemctl", "restart", "mosquitto"], check=True)
 
 
-# Registry helpers
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def ensure_registry_dir() -> None:
-    # Create /var/lib/hint owned by root:hub so the hub user can read it.
-    subprocess.run(
-        [
-            "sudo",
-            "install",
-            "-d",
-            "-m",
-            "775",
-            "-o",
-            "root",
-            "-g",
-            "hub",
-            str(REGISTRY_DIR),
-        ],
-        check=True,
-    )
+    """Ensure /var/lib/hint exists.
+
+    NOTE: This function does not use sudo. The directory must already be writable
+    by the service user (hub), typically via root:hub ownership and group write.
+    """
+    REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def read_registry() -> dict:
-    if not REGISTRY_PATH.exists():
-        return {}
-
-    # Read via sudo in case permissions are tightened.
-    res = subprocess.run(
-        ["sudo", "cat", str(REGISTRY_PATH)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    txt = res.stdout.strip()
-    if not txt:
-        return {}
-    try:
-        d = json.loads(txt)
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
+    return _read_json_file(REGISTRY_PATH, default={})
 
 
 def write_registry(reg: dict) -> None:
     ensure_registry_dir()
-
-    # Write atomically: write temp file as hub user, then sudo move into place.
-    tmp_path = Path(f"/tmp/hint-devices-{os.getpid()}.json")
-    tmp_path.write_text(json.dumps(reg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    subprocess.run(["sudo", "mv", str(tmp_path), str(REGISTRY_PATH)], check=True)
-    subprocess.run(["sudo", "chown", "root:hub", str(REGISTRY_PATH)], check=True)
-    subprocess.run(["sudo", "chmod", "664", str(REGISTRY_PATH)], check=True)
+    if not isinstance(reg, dict):
+        reg = {}
+    _atomic_write_json(REGISTRY_PATH, reg)
 
 
 # --- UI config helpers ---
@@ -441,30 +443,14 @@ def read_ui_config() -> dict:
         ]
       }
     """
-    if not UI_CONFIG_PATH.exists():
-        return {"devices": {}, "phrases": []}
+    d = _read_json_file(UI_CONFIG_PATH, default={"devices": {}, "phrases": []})
 
-    try:
-        res = subprocess.run(
-            ["sudo", "cat", str(UI_CONFIG_PATH)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-        )
-        txt = res.stdout.strip()
-        if not txt:
-            return {"devices": {}, "phrases": []}
-        d = json.loads(txt)
-        if not isinstance(d, dict):
-            return {"devices": {}, "phrases": []}
-        if not isinstance(d.get("devices"), dict):
-            d["devices"] = {}
-        if not isinstance(d.get("phrases"), list):
-            d["phrases"] = []
-        return d
-    except Exception:
-        return {"devices": {}, "phrases": []}
+    # Normalize
+    if not isinstance(d.get("devices"), dict):
+        d["devices"] = {}
+    if not isinstance(d.get("phrases"), list):
+        d["phrases"] = []
+    return d
 
 
 def write_ui_config(cfg: dict) -> None:
@@ -477,12 +463,7 @@ def write_ui_config(cfg: dict) -> None:
     if not isinstance(cfg.get("phrases"), list):
         cfg["phrases"] = []
 
-    tmp_path = Path(f"/tmp/hint-ui-config-{os.getpid()}.json")
-    tmp_path.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    subprocess.run(["sudo", "mv", str(tmp_path), str(UI_CONFIG_PATH)], check=True)
-    subprocess.run(["sudo", "chown", "root:hub", str(UI_CONFIG_PATH)], check=True)
-    subprocess.run(["sudo", "chmod", "664", str(UI_CONFIG_PATH)], check=True)
+    _atomic_write_json(UI_CONFIG_PATH, cfg)
 
 
 def get_device_ui_cfg(device_id: str) -> dict:
