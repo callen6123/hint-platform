@@ -8,6 +8,7 @@ import tempfile
 import urllib.request
 import os
 import sys
+import signal
 import threading
 import queue
 from pathlib import Path
@@ -402,11 +403,22 @@ def main() -> None:
 
     def _kill_proc(p: subprocess.Popen) -> None:
         try:
-            p.terminate()
+            if p.poll() is not None:
+                return
+
+            # Prefer killing the whole process group so children (if any) also stop.
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except Exception:
+                p.terminate()
+
             try:
                 p.wait(timeout=2)
             except Exception:
-                p.kill()
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except Exception:
+                    p.kill()
         except Exception:
             pass
 
@@ -420,6 +432,7 @@ def main() -> None:
         with q_lock:
             if current_proc is not None and current_job is not None:
                 if all_jobs or (command_id and current_job.get("command_id") == command_id):
+                    # Kill the active playback process (and its process group) so audio stops immediately.
                     _kill_proc(current_proc)
                     stopped = True
                     current_proc = None
@@ -542,9 +555,19 @@ def main() -> None:
                     # We keep play_file() for non-cancellable paths; here we use Popen.
                     cmd = _aplay_cmd_for(local_path)
                     with q_lock:
-                        current_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        current_proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            start_new_session=True,
+                        )
 
                     rc = current_proc.wait()
+                    # If we were cancelled mid-playback, current_proc may have been cleared.
+                    # In that case, treat it as cancelled.
+                    if current_proc is None:
+                        raise RuntimeError("playback_cancelled")
                     err = (current_proc.stderr.read() if current_proc.stderr else "").strip()
                     out = (current_proc.stdout.read() if current_proc.stdout else "").strip()
 
