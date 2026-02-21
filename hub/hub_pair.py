@@ -2127,21 +2127,39 @@ def speak_page():
 
   async function waitForAck(device_id, command_id, timeoutMs){
     const start = Date.now();
-    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 8000;
+    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 12000;
+
+    // We want the terminal ACK for a command. Devices usually emit:
+    //   accepted -> completed (or error)
+    // So we keep polling until we see a non-"accepted" status, or we time out.
+
+    let lastSeen = null;
+
     while ((Date.now() - start) < timeout) {
       try {
         const st = await getStatus();
         const dev = findDeviceInStatus(st, device_id);
         const ack = dev && dev.last_ack ? dev.last_ack : null;
+
         if (ack && String(ack.command_id || '') === String(command_id || '')) {
-          return ack;
+          lastSeen = ack;
+          const status = String(ack.status || '').toLowerCase();
+
+          // Keep waiting if we only have an intermediate ACK.
+          if (status === 'accepted') {
+            // continue polling
+          } else {
+            return ack;
+          }
         }
       } catch(e) {
         // ignore transient errors during polling
       }
       await new Promise(r => setTimeout(r, 400));
     }
-    return null;
+
+    // If we timed out but we did see something (like accepted), return it.
+    return lastSeen;
   }
 
   function setStatus(s){
@@ -2315,7 +2333,7 @@ def speak_page():
       log(`Queued: ${JSON.stringify(r)}`);
       // --- Poll for device ACK after speak command ---
       if (r && r.command_id) {
-        const ack = await waitForAck(device_id, r.command_id, 12000);
+        const ack = await waitForAck(device_id, r.command_id, 45000);
         if (ack) {
           log(`Device ACK: ${JSON.stringify(ack)}`);
         } else {
@@ -2344,7 +2362,7 @@ def speak_page():
       log(`Cancel sent: ${JSON.stringify(r)}`);
       // --- Poll for device ACK after cancel command ---
       if (r && r.command_id) {
-        const ack = await waitForAck(device_id, r.command_id, 8000);
+        const ack = await waitForAck(device_id, r.command_id, 15000);
         if (ack) {
           log(`Cancel ACK: ${JSON.stringify(ack)}`);
         } else {
