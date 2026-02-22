@@ -33,6 +33,13 @@ HEARTBEAT_SEC = max(5, min(HEARTBEAT_SEC, 3600))
 STATE_DEBOUNCE_SEC = float(os.environ.get("HINT_STATE_DEBOUNCE_SEC", "1.0"))
 STATE_DEBOUNCE_SEC = max(0.0, min(STATE_DEBOUNCE_SEC, 10.0))
 
+# Hub reachability health (device -> hub HTTP)
+HINT_HUB_HEALTH_URL = os.environ.get("HINT_HUB_HEALTH_URL", "http://hinthub.local:5000/audio/health").strip()
+HINT_HUB_HEALTH_INTERVAL_SEC = float(os.environ.get("HINT_HUB_HEALTH_INTERVAL_SEC", "20"))
+HINT_HUB_HEALTH_INTERVAL_SEC = max(5.0, min(HINT_HUB_HEALTH_INTERVAL_SEC, 300.0))
+HINT_HUB_HEALTH_TIMEOUT_SEC = float(os.environ.get("HINT_HUB_HEALTH_TIMEOUT_SEC", "2.5"))
+HINT_HUB_HEALTH_TIMEOUT_SEC = max(0.5, min(HINT_HUB_HEALTH_TIMEOUT_SEC, 10.0))
+
 # OTA paths
 OTA_STAGING = Path("/opt/hint/agent_staging")
 OTA_RELEASES = Path("/opt/hint/agent_releases")
@@ -392,6 +399,64 @@ def main() -> None:
 
     device_id = prov.get("device_id", socket.gethostname())
 
+    # --- Hub reachability state (from device perspective)
+    hub_lock = threading.Lock()
+    hub_reachable: bool | None = None
+    hub_last_ok_at: int | None = None
+    hub_last_err_at: int | None = None
+    hub_last_err: str | None = None
+    hub_rtt_ms: int | None = None
+
+    def _check_hub_once() -> tuple[bool, int | None, str | None]:
+        """Return (ok, rtt_ms, err)."""
+        if not HINT_HUB_HEALTH_URL:
+            return True, None, None
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(
+                HINT_HUB_HEALTH_URL,
+                headers={"User-Agent": "hint-agent/health"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=HINT_HUB_HEALTH_TIMEOUT_SEC) as r:
+                # Any 2xx is considered OK.
+                code = getattr(r, "status", None) or r.getcode()
+                if code < 200 or code >= 300:
+                    raise RuntimeError(f"http_{code}")
+                # Read a small amount to ensure the connection is usable.
+                r.read(256)
+            rtt = int((time.time() - t0) * 1000)
+            return True, rtt, None
+        except Exception as e:
+            rtt = int((time.time() - t0) * 1000)
+            return False, rtt, str(e)
+
+    def hub_health_loop() -> None:
+        nonlocal hub_reachable, hub_last_ok_at, hub_last_err_at, hub_last_err, hub_rtt_ms
+        while True:
+            ok, rtt, err = _check_hub_once()
+            now_i = int(time.time())
+            with hub_lock:
+                hub_reachable = ok
+                hub_rtt_ms = rtt
+                if ok:
+                    hub_last_ok_at = now_i
+                    hub_last_err_at = None
+                    hub_last_err = None
+                else:
+                    hub_last_err_at = now_i
+                    hub_last_err = (err or "unknown")[:200]
+            # Nudge the hub with a retained state refresh when this flips.
+            try:
+                # force=True ensures it publishes even if status hasn't changed.
+                publish_state(last_state or "IDLE", force=True)
+            except Exception:
+                pass
+            time.sleep(HINT_HUB_HEALTH_INTERVAL_SEC)
+
+    # Start hub health thread
+    threading.Thread(target=hub_health_loop, name="hub-health", daemon=True).start()
+
     last_state: str | None = None
     last_state_publish_ts: float = 0.0
 
@@ -650,6 +715,19 @@ def main() -> None:
 
         payload = {"device_id": device_id, "status": status, "ts": int(now)}
         payload.update(current_versions())
+
+        # Attach hub reachability snapshot
+        try:
+            with hub_lock:
+                payload["hub_reachable"] = hub_reachable
+                payload["hub_last_ok_at"] = hub_last_ok_at
+                payload["hub_last_err_at"] = hub_last_err_at
+                payload["hub_last_err"] = hub_last_err
+                payload["hub_rtt_ms"] = hub_rtt_ms
+                payload["hub_health_url"] = HINT_HUB_HEALTH_URL
+        except Exception:
+            pass
+
         c.publish(state_t, json.dumps(payload), qos=1, retain=True)
         last_state = status
         last_state_publish_ts = now
@@ -805,6 +883,19 @@ def main() -> None:
 
             payload = {"device_id": device_id, "status": last_state, "ts": int(now)}
             payload.update(current_versions())
+
+            # Attach hub reachability snapshot
+            try:
+                with hub_lock:
+                    payload["hub_reachable"] = hub_reachable
+                    payload["hub_last_ok_at"] = hub_last_ok_at
+                    payload["hub_last_err_at"] = hub_last_err_at
+                    payload["hub_last_err"] = hub_last_err
+                    payload["hub_rtt_ms"] = hub_rtt_ms
+                    payload["hub_health_url"] = HINT_HUB_HEALTH_URL
+            except Exception:
+                pass
+
             c.publish(state_t, json.dumps(payload), qos=1, retain=True)
             last_state_publish_ts = now
 
