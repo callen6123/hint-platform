@@ -1693,36 +1693,109 @@ def ui_status():
                 drec["default_voice_id"] = u.get("default_voice_id")
 
         # --- Reconcile last_speak state with last_ack (end-to-end progress) ---
+        # We want the UI to show an end-to-end pipeline:
+        #   generated -> sent -> accepted -> completed
+        # plus: error/timeout when ACKs do not arrive.
+        #
+        # Notes:
+        # - `last_ack.ts` comes from the device (epoch seconds).
+        # - `last_speak.issued_at/sent_at` are hub timestamps.
+        # - We only reconcile when the ACK's command_id matches last_speak.command_id.
         ls = rec.get("last_speak") if isinstance(rec.get("last_speak"), dict) else None
         ack = rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else None
 
-        if ls and ack:
+        # Timeouts (seconds) can be tuned via env vars.
+        # - accepted timeout: how long after we send before we expect *any* ACK.
+        # - completed timeout: how long after accepted before we expect completion.
+        try:
+            ack_accept_timeout = int(os.environ.get("HINT_SPEAK_ACK_ACCEPT_TIMEOUT_SEC", "20"))
+        except Exception:
+            ack_accept_timeout = 20
+        try:
+            ack_complete_timeout = int(os.environ.get("HINT_SPEAK_ACK_COMPLETE_TIMEOUT_SEC", "180"))
+        except Exception:
+            ack_complete_timeout = 180
+        ack_accept_timeout = max(5, min(ack_accept_timeout, 3600))
+        ack_complete_timeout = max(10, min(ack_complete_timeout, 24 * 3600))
+
+        now_ts = int(time.time())
+
+        def _set_last_speak_state(new_ls: dict) -> None:
+            """Persist updated last_speak into both response and registry."""
+            nonlocal changed
+            rec["last_speak"] = new_ls
+            drec["last_speak"] = new_ls
+            reg[device_id] = rec
+            changed = True
+
+        if isinstance(ls, dict):
+            # Always include last_speak in response even if we don't change it.
+            drec["last_speak"] = ls
+
             ls_cid = str(ls.get("command_id") or "")
-            ack_cid = str(ack.get("command_id") or "")
-            if ls_cid and ack_cid and ls_cid == ack_cid:
+            ls_state = str(ls.get("state") or "").strip().lower()
+            sent_at = ls.get("sent_at")
+            issued_at = ls.get("issued_at")
+            ack_ts = ls.get("ack_ts")  # when we first saw an ACK (epoch seconds)
+
+            # If we have a matching ACK, use it as truth.
+            if isinstance(ack, dict) and str(ack.get("command_id") or "") == ls_cid and ls_cid:
                 ack_status = str(ack.get("status") or "").strip().lower()
                 if ack_status:
-                    cur_state = str(ls.get("state") or "").strip().lower()
-                    if cur_state != ack_status:
-                        # Update registry and response
-                        new_ls = dict(ls)
-                        new_ls["state"] = ack_status
-                        # Best-effort: preserve ack timestamp for UI
-                        if "ts" in ack:
-                            new_ls["ack_ts"] = ack.get("ts")
-                        rec["last_speak"] = new_ls
-                        drec["last_speak"] = new_ls
-                        reg[device_id] = rec
-                        changed = True
+                    # Normalize status names
+                    if ack_status in ("accepted", "completed"):
+                        if ls_state != ack_status:
+                            new_ls = dict(ls)
+                            new_ls["state"] = ack_status
+                            # record first-ack timestamp
+                            if "ts" in ack and new_ls.get("ack_ts") is None:
+                                new_ls["ack_ts"] = ack.get("ts")
+                            if ack_status == "completed":
+                                new_ls["completed_at"] = ack.get("ts") if "ts" in ack else now_ts
+                            _set_last_speak_state(new_ls)
+                        else:
+                            # Keep response consistent
+                            drec["last_speak"] = ls
                     else:
-                        # Keep response consistent even if registry already correct
-                        drec["last_speak"] = ls
-                else:
-                    drec["last_speak"] = ls
+                        # Treat anything else as error-like
+                        if ls_state != "error":
+                            new_ls = dict(ls)
+                            new_ls["state"] = "error"
+                            new_ls["error"] = ack.get("error") or ack.get("details") or ack_status
+                            if "ts" in ack and new_ls.get("ack_ts") is None:
+                                new_ls["ack_ts"] = ack.get("ts")
+                            _set_last_speak_state(new_ls)
+
+            # No matching ACK yet: enforce timeouts based on hub timestamps.
             else:
-                drec["last_speak"] = ls
-        elif ls:
-            drec["last_speak"] = ls
+                # Establish a baseline start time for timeout checks
+                base = None
+                if isinstance(sent_at, (int, float)):
+                    base = int(sent_at)
+                elif isinstance(issued_at, (int, float)):
+                    base = int(issued_at)
+
+                # If we never even marked it sent, don't timeout it here.
+                if base is not None:
+                    # 1) Waiting for first ACK after send
+                    if ls_state in ("generated", "sent"):
+                        if (now_ts - base) > ack_accept_timeout:
+                            new_ls = dict(ls)
+                            new_ls["state"] = "timeout"
+                            new_ls["error"] = f"ack_timeout_after_{ack_accept_timeout}s"
+                            new_ls["timeout_at"] = now_ts
+                            _set_last_speak_state(new_ls)
+
+                    # 2) Waiting for completion after accepted
+                    elif ls_state == "accepted":
+                        # Prefer ack_ts (device-provided) if present, else fall back to base
+                        accepted_base = int(ack_ts) if isinstance(ack_ts, (int, float)) else base
+                        if (now_ts - accepted_base) > ack_complete_timeout:
+                            new_ls = dict(ls)
+                            new_ls["state"] = "timeout"
+                            new_ls["error"] = f"complete_timeout_after_{ack_complete_timeout}s"
+                            new_ls["timeout_at"] = now_ts
+                            _set_last_speak_state(new_ls)
 
         devices.append(drec)
 
