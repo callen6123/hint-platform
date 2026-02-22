@@ -1687,9 +1687,9 @@ def ui_status():
         # last_seen is expected to be an ISO string (UTC). If missing or too old,
         # treat device as offline.
         try:
-            offline_after = int(os.environ.get("HINT_DEVICE_OFFLINE_AFTER_SEC", "30"))
+            offline_after = int(os.environ.get("HINT_DEVICE_OFFLINE_AFTER_SEC", "60"))
         except Exception:
-            offline_after = 30
+            offline_after = 60
         offline_after = max(5, min(offline_after, 24 * 3600))
 
         last_seen_iso = rec.get("last_seen")
@@ -1709,6 +1709,14 @@ def ui_status():
         now_ts = int(time.time())
         age_sec = (now_ts - last_seen_ts) if isinstance(last_seen_ts, int) else None
         is_online = bool(age_sec is not None and age_sec >= 0 and age_sec <= offline_after)
+        offline_reason = None
+        if not is_online:
+            if last_seen_ts is None:
+                offline_reason = "never_seen"
+            elif age_sec is not None and age_sec < 0:
+                offline_reason = "clock_skew"
+            else:
+                offline_reason = "stale_last_seen"
 
         # Merge UI config fields into response record
         drec = dict(rec)
@@ -1720,6 +1728,7 @@ def ui_status():
         drec["offline_after_sec"] = offline_after
         drec["last_seen_ts"] = last_seen_ts
         drec["last_seen_age_sec"] = age_sec
+        drec["offline_reason"] = offline_reason
 
         # Normalize status for the UI table
         drec["status"] = "online" if is_online else "offline"

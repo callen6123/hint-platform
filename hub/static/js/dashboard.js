@@ -101,6 +101,22 @@ async function loadAudioStatus(){
     return isOnline(d) ? 'online' : 'offline';
   }
 
+  function offlineReasonLabel(r){
+    r = String(r || '').toLowerCase();
+    if (r === 'never_seen') return 'Never seen';
+    if (r === 'clock_skew') return 'Clock skew';
+    if (r === 'stale_last_seen') return 'Stale last_seen';
+    return r ? r : 'Offline';
+  }
+
+  function offlineDetail(d){
+    const reason = offlineReasonLabel(d.offline_reason);
+    const ageSec = (typeof d.last_seen_age_sec === 'number') ? d.last_seen_age_sec : null;
+    const ageStr = (ageSec != null) ? fmtAgeSeconds(ageSec) : '';
+    if (ageStr) return `${reason} (${ageStr})`;
+    return reason;
+  }
+
   function lastCmd(d){
     const cid = fmt(d.last_command_id || '');
     const st = fmt(d.last_command_status || '');
@@ -216,11 +232,11 @@ async function loadAudioStatus(){
           <td>
             ${d.friendly_name ? `<div><b>${String(d.friendly_name)}</b></div>` : ``}
             <span class=\"pill\">${did}</span>
-            ${!isOnline(d) ? `<div class=\"muted\" style=\"margin-top:6px;\"><b>Offline</b>${ageStr ? ` <span class=\"muted\">(${ageStr})</span>` : ''}</div>` : ``}
+            ${!isOnline(d) ? `<div class=\"muted\" style=\"margin-top:6px;\"><b>${offlineDetail(d)}</b></div>` : ``}
             ${d.last_speak && d.last_speak.command_id ? `<div class=\"muted\" style=\"margin-top:6px;\">Speak: ${String(d.last_speak.state || 'sent')}<span class=\"muted\"> (${String(d.last_speak.command_id)})</span></div>` : ``}
           </td>
           <td class=\"${statusClass(st)}\">${st}</td>
-          <td class=\"muted\">${ls}${ageStr ? ` <span class=\"muted\">(${ageStr})</span>` : ''}</td>
+          <td class=\"muted\">${ls}${ageStr ? ` <span class=\"muted\">(${ageStr})</span>` : ''}${!isOnline(d) && d.offline_reason ? ` <span class=\"muted\">[${offlineReasonLabel(d.offline_reason)}]</span>` : ''}</td>
           <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
           <td>${sv}</td>
           <td class=\"muted\">${lc}</td>
