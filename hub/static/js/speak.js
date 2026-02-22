@@ -298,8 +298,9 @@
 
     try {
       // Disable primary controls while request is in-flight
+      // NOTE: Keep Cancel enabled so the user can stop playback mid-flight.
       $("speakBtn").disabled = true;
-      if ($("cancelBtn")) $("cancelBtn").disabled = true;
+      if ($("cancelBtn")) $("cancelBtn").disabled = false;
       if ($("refreshBtn")) $("refreshBtn").disabled = true;
       if ($("device")) $("device").disabled = true;
       if ($("voice")) $("voice").disabled = true;
