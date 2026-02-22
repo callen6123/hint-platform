@@ -1720,6 +1720,39 @@ def ui_status():
 
         # Merge UI config fields into response record
         drec = dict(rec)
+        # --- Last reported device state (from MQTT state topic) ---
+        # The device agent publishes a retained JSON state payload. We store the last payload
+        # in the registry as `last_state` (if present). Surface key health fields to the UI.
+        last_state = rec.get("last_state")
+        if not isinstance(last_state, dict):
+            # Backward/alternate naming safety
+            last_state = rec.get("state") if isinstance(rec.get("state"), dict) else None
+
+        if isinstance(last_state, dict):
+            # Keep the full state available for debugging
+            drec["last_state"] = last_state
+
+            # Hub reachability / audio health (published by device)
+            drec["hub_health_url"] = last_state.get("hub_health_url")
+            drec["hub_reachable"] = last_state.get("hub_reachable")
+            drec["hub_rtt_ms"] = last_state.get("hub_rtt_ms")
+            drec["hub_last_ok_at"] = last_state.get("hub_last_ok_at")
+            drec["hub_last_err_at"] = last_state.get("hub_last_err_at")
+            drec["hub_last_err"] = last_state.get("hub_last_err")
+
+            # Optional: device-side audio/player details if present
+            drec["audio_device"] = last_state.get("audio_device")
+            drec["audio_backend"] = last_state.get("audio_backend")
+
+            # Simple derived status for dashboard badges
+            hr = last_state.get("hub_reachable")
+            if hr is True:
+                drec["hub_health"] = "ok"
+            elif hr is False:
+                drec["hub_health"] = "error"
+            else:
+                drec["hub_health"] = "unknown"
+
         # Preserve the raw registry status separately
         drec["registry_status"] = drec.get("status")
 
@@ -1739,6 +1772,14 @@ def ui_status():
                 drec["friendly_name"] = u.get("friendly_name")
             if "default_voice_id" in u:
                 drec["default_voice_id"] = u.get("default_voice_id")
+        # If the device is online but cannot reach the hub's audio health endpoint,
+        # expose a warning flag for the dashboard.
+        if drec.get("online") and drec.get("hub_reachable") is False:
+            drec["warning"] = "hub_unreachable"
+        elif not drec.get("online"):
+            drec["warning"] = "device_offline"
+        else:
+            drec["warning"] = None
 
         # --- Reconcile last_speak state with last_ack (end-to-end progress) ---
         # We want the UI to show an end-to-end pipeline:

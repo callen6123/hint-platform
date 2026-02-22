@@ -117,6 +117,59 @@ async function loadAudioStatus(){
     return reason;
   }
 
+  function esc(s){
+    return String(s == null ? '' : s)
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'",'&#39;');
+  }
+
+  function hubHealthLabel(h){
+    h = String(h || '').toLowerCase();
+    if (h === 'ok') return 'Hub OK';
+    if (h === 'error') return 'Hub unreachable';
+    return 'Hub unknown';
+  }
+
+  function warningLabel(w){
+    w = String(w || '').toLowerCase();
+    if (w === 'hub_unreachable') return 'Hub unreachable';
+    if (w === 'device_offline') return 'Device offline';
+    return w ? w : '';
+  }
+
+  function renderWarnings(d){
+    const parts = [];
+
+    // Explicit warning from hub
+    const w = warningLabel(d.warning);
+    if (w) parts.push(`<div class="warn">⚠ ${esc(w)}</div>`);
+
+    // Hub health (derived)
+    const hh = String(d.hub_health || '').toLowerCase();
+    if (hh && hh !== 'ok') {
+      parts.push(`<div class="warn">⚠ ${esc(hubHealthLabel(hh))}</div>`);
+    }
+
+    // Last state details (optional)
+    const ls = d.last_state;
+    if (ls && typeof ls === 'object') {
+      // If we have a hub error string, show it
+      const herr = ls.hub_last_err;
+      if (herr) parts.push(`<div class="muted">hub err: ${esc(herr)}</div>`);
+
+      // If we have last-ok timestamp, show age if present
+      if (typeof ls.hub_last_ok_age_sec === 'number') {
+        const age = fmtAgeSeconds(ls.hub_last_ok_age_sec);
+        if (age) parts.push(`<div class="muted">hub ok: ${esc(age)}</div>`);
+      }
+    }
+
+    return parts.join('');
+  }
+
   function lastCmd(d){
     const cid = fmt(d.last_command_id || '');
     const st = fmt(d.last_command_status || '');
@@ -231,20 +284,21 @@ async function loadAudioStatus(){
         <tr>
           <td>
             ${d.friendly_name ? `<div><b>${String(d.friendly_name)}</b></div>` : ``}
-            <span class=\"pill\">${did}</span>
-            ${!isOnline(d) ? `<div class=\"muted\" style=\"margin-top:6px;\"><b>${offlineDetail(d)}</b></div>` : ``}
-            ${d.last_speak && d.last_speak.command_id ? `<div class=\"muted\" style=\"margin-top:6px;\">Speak: ${String(d.last_speak.state || 'sent')}<span class=\"muted\"> (${String(d.last_speak.command_id)})</span></div>` : ``}
+            <span class="pill">${did}</span>
+            ${renderWarnings(d) ? `<div style="margin-top:6px;">${renderWarnings(d)}</div>` : ``}
+            ${!isOnline(d) ? `<div class="muted" style="margin-top:6px;"><b>${offlineDetail(d)}</b></div>` : ``}
+            ${d.last_speak && d.last_speak.command_id ? `<div class="muted" style="margin-top:6px;">Speak: ${String(d.last_speak.state || 'sent')}<span class="muted"> (${String(d.last_speak.command_id)})</span></div>` : ``}
           </td>
-          <td class=\"${statusClass(st)}\">${st}</td>
-          <td class=\"muted\">${ls}${ageStr ? ` <span class=\"muted\">(${ageStr})</span>` : ''}${!isOnline(d) && d.offline_reason ? ` <span class=\"muted\">[${offlineReasonLabel(d.offline_reason)}]</span>` : ''}</td>
+          <td class="${statusClass(st)}">${st}</td>
+          <td class="muted">${ls}${ageStr ? ` <span class="muted">(${ageStr})</span>` : ''}${!isOnline(d) && d.offline_reason ? ` <span class="muted">[${offlineReasonLabel(d.offline_reason)}]</span>` : ''}</td>
           <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
           <td>${sv}</td>
-          <td class=\"muted\">${lc}</td>
-          <td class=\"muted\">${lr}</td>
+          <td class="muted">${lc}</td>
+          <td class="muted">${lr}</td>
           <td>
-            <div class=\"row-actions\">
-              <button data-action=\"update\" data-device=\"${did}\">Update</button>
-              <button data-action=\"buildUpdate\" data-device=\"${did}\">Build+Update</button>
+            <div class="row-actions">
+              <button data-action="update" data-device="${did}">Update</button>
+              <button data-action="buildUpdate" data-device="${did}">Build+Update</button>
             </div>
           </td>
         </tr>
