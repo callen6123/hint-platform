@@ -1683,8 +1683,47 @@ def ui_status():
         # Work on the canonical registry record for this device_id
         device_id = str(rec.get("device_id") or did_key)
 
+        # --- Derive online/offline from last_seen ---
+        # last_seen is expected to be an ISO string (UTC). If missing or too old,
+        # treat device as offline.
+        try:
+            offline_after = int(os.environ.get("HINT_DEVICE_OFFLINE_AFTER_SEC", "30"))
+        except Exception:
+            offline_after = 30
+        offline_after = max(5, min(offline_after, 24 * 3600))
+
+        last_seen_iso = rec.get("last_seen")
+        last_seen_ts = None
+        if isinstance(last_seen_iso, str) and last_seen_iso.strip():
+            try:
+                s = last_seen_iso.strip()
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                last_seen_ts = int(dt.timestamp())
+            except Exception:
+                last_seen_ts = None
+
+        now_ts = int(time.time())
+        age_sec = (now_ts - last_seen_ts) if isinstance(last_seen_ts, int) else None
+        is_online = bool(age_sec is not None and age_sec >= 0 and age_sec <= offline_after)
+
         # Merge UI config fields into response record
         drec = dict(rec)
+        # Preserve the raw registry status separately
+        drec["registry_status"] = drec.get("status")
+
+        # Derived online/offline fields for UI
+        drec["online"] = is_online
+        drec["offline_after_sec"] = offline_after
+        drec["last_seen_ts"] = last_seen_ts
+        drec["last_seen_age_sec"] = age_sec
+
+        # Normalize status for the UI table
+        drec["status"] = "online" if is_online else "offline"
+
         u = ui_devs.get(device_id)
         if isinstance(u, dict):
             if "friendly_name" in u:

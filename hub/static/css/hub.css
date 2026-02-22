@@ -276,3 +276,9 @@ textarea#speakText {
 /* Optional: nicer links */
 a { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; }
+
+/* Speak UX: character counter over-limit state */
+.char-count.over {
+  color: var(--danger);
+  font-weight: 700;
+}

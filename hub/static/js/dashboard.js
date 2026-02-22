@@ -78,6 +78,29 @@ async function loadAudioStatus(){
     return v == null ? '' : String(v);
   }
 
+  function fmtAgeSeconds(sec){
+    sec = Number(sec);
+    if (!isFinite(sec) || sec < 0) return '';
+    if (sec < 5) return 'just now';
+    if (sec < 60) return `${Math.floor(sec)}s ago`;
+    const m = sec / 60;
+    if (m < 60) return `${Math.floor(m)}m ago`;
+    const h = m / 60;
+    if (h < 48) return `${Math.floor(h)}h ago`;
+    const d = h / 24;
+    return `${Math.floor(d)}d ago`;
+  }
+
+  function isOnline(d){
+    if (typeof d.online === 'boolean') return d.online;
+    const s = String(d.status || '').toLowerCase();
+    return s === 'online';
+  }
+
+  function normStatus(d){
+    return isOnline(d) ? 'online' : 'offline';
+  }
+
   function lastCmd(d){
     const cid = fmt(d.last_command_id || '');
     const st = fmt(d.last_command_status || '');
@@ -175,8 +198,12 @@ async function loadAudioStatus(){
 
     tbody.innerHTML = devices.map(d => {
       const did = fmt(d.device_id);
-      const st = fmt(d.status || 'unknown');
-      const ls = fmt(d.last_seen || '');
+      const st = normStatus(d);
+
+      const lastSeenIso = fmt(d.last_seen || '');
+      const ageSec = (typeof d.last_seen_age_sec === 'number') ? d.last_seen_age_sec : null;
+      const ageStr = (ageSec != null) ? fmtAgeSeconds(ageSec) : '';
+      const ls = lastSeenIso;
       const avRaw = fmt(d.agent_version || '(unknown)');
       const svRaw = fmt(d.setup_version || '(unknown)');
       const needsUpdate = otaLatest && avRaw && (avRaw !== '(unknown)') && (avRaw !== String(otaLatest));
@@ -189,10 +216,11 @@ async function loadAudioStatus(){
           <td>
             ${d.friendly_name ? `<div><b>${String(d.friendly_name)}</b></div>` : ``}
             <span class=\"pill\">${did}</span>
+            ${!isOnline(d) ? `<div class=\"muted\" style=\"margin-top:6px;\"><b>Offline</b>${ageStr ? ` <span class=\"muted\">(${ageStr})</span>` : ''}</div>` : ``}
             ${d.last_speak && d.last_speak.command_id ? `<div class=\"muted\" style=\"margin-top:6px;\">Speak: ${String(d.last_speak.state || 'sent')}<span class=\"muted\"> (${String(d.last_speak.command_id)})</span></div>` : ``}
           </td>
           <td class=\"${statusClass(st)}\">${st}</td>
-          <td class=\"muted\">${ls}</td>
+          <td class=\"muted\">${ls}${ageStr ? ` <span class=\"muted\">(${ageStr})</span>` : ''}</td>
           <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
           <td>${sv}</td>
           <td class=\"muted\">${lc}</td>

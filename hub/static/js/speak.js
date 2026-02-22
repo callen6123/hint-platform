@@ -8,6 +8,7 @@
 
   function log(msg){
     const ts = new Date().toISOString();
+    if (!logEl) return;
     logEl.textContent += `[${ts}] ${msg}\n`;
     logEl.scrollTop = logEl.scrollHeight;
   }
@@ -87,7 +88,17 @@
     const ta = $("text");
     const cc = $("charCount");
     if (!ta || !cc) return;
-    cc.textContent = String((ta.value || '').length);
+    const len = String(ta.value || '').length;
+    const max = parseInt((ta.dataset && ta.dataset.maxchars) ? ta.dataset.maxchars : '', 10);
+    const hasMax = Number.isFinite(max) && max > 0;
+
+    cc.textContent = hasMax ? `${len} / ${max}` : String(len);
+
+    // Optional visual cue when exceeding max
+    if (hasMax) {
+      if (len > max) cc.classList.add('over');
+      else cc.classList.remove('over');
+    }
   }
 
   function setSpeakProgress(state, meta){
@@ -275,17 +286,34 @@
     if (!voice_id) { log('Pick a voice first.'); return; }
     if (!text) { log('Type a message first.'); return; }
 
+    // Optional max char guard (matches data-maxchars on textarea)
+    const ta = $("text");
+    const max = parseInt((ta && ta.dataset && ta.dataset.maxchars) ? ta.dataset.maxchars : '', 10);
+    if (Number.isFinite(max) && max > 0 && text.length > max) {
+      log(`Message too long (${text.length}/${max}).`);
+      setStatus('Too long');
+      setSpeakProgress('error', `Message too long (${text.length}/${max})`);
+      return;
+    }
+
     try {
+      // Disable primary controls while request is in-flight
       $("speakBtn").disabled = true;
+      if ($("cancelBtn")) $("cancelBtn").disabled = true;
+      if ($("refreshBtn")) $("refreshBtn").disabled = true;
+      if ($("device")) $("device").disabled = true;
+      if ($("voice")) $("voice").disabled = true;
+
       setStatus('Generating…');
-      setSpeakProgress('generated', 'Generating audio…');
+      setSpeakProgress('generated', 'Generating audio on hub…');
       log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
       const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
+      // Hub has generated/stored audio and published the command at this point.
+      setSpeakProgress('sent', r && r.command_id ? `Command ID: ${r.command_id}` : 'Sent');
       log(`Queued: ${JSON.stringify(r)}`);
       // --- Poll for device ACK after speak command ---
       if (r && r.command_id) {
         setStatus(`Sent (command_id=${r.command_id})`);
-        setSpeakProgress('sent', `Command ID: ${r.command_id}`);
 
         const ack = await waitForAck(device_id, r.command_id, 45000, (a) => {
           const st = String(a.status || '').toLowerCase();
@@ -321,6 +349,10 @@
       log(`Speak failed: ${e.message}`);
     } finally {
       $("speakBtn").disabled = false;
+      if ($("cancelBtn")) $("cancelBtn").disabled = false;
+      if ($("refreshBtn")) $("refreshBtn").disabled = false;
+      if ($("device")) $("device").disabled = false;
+      if ($("voice")) $("voice").disabled = false;
     }
   });
 
@@ -331,6 +363,7 @@
 
     try {
       $("cancelBtn").disabled = true;
+      if ($("speakBtn")) $("speakBtn").disabled = true;
       setStatus('Canceling…');
       log(`Cancel: device=${device_id}, mode=${mode}`);
       const r = await api('/ui/cancel', 'POST', { device_id, mode });
@@ -362,6 +395,7 @@
       log(`Cancel failed: ${e.message}`);
     } finally {
       $("cancelBtn").disabled = false;
+      if ($("speakBtn")) $("speakBtn").disabled = false;
     }
   });
 
