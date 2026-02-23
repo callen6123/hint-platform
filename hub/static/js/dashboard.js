@@ -200,6 +200,12 @@ async function loadAudioStatus(){
     }
 
     const parts = [];
+    if (info.hubHealth) {
+      const hh = String(info.hubHealth).toLowerCase();
+      if (hh === 'ok') parts.push(`<div><b>Hub:</b> <span class="pill">OK</span></div>`);
+      else if (hh === 'error') parts.push(`<div><b>Hub:</b> <span class="pill">ERROR</span> <span class="muted">(unreachable)</span></div>`);
+      else parts.push(`<div><b>Hub:</b> <span class="muted">unknown</span></div>`);
+    }
     if (info.otaLatest) {
       parts.push(`<div><b>Device OTA:</b> latest <span class="pill">${info.otaLatest}</span></div>`);
     } else {
@@ -232,6 +238,17 @@ async function loadAudioStatus(){
     try {
       const data = await api('/ui/status', 'GET');
       const devices = data.devices || [];
+
+      // Hub health (from /ui/status). If the hub reports an error state,
+      // annotate devices so `renderWarnings()` can show it.
+      const hubHealthObj = (data && typeof data === 'object') ? (data.hub_health || null) : null;
+      const hubHealthOk = !!(hubHealthObj && hubHealthObj.ok);
+      if (hubHealthObj && !hubHealthOk) {
+        devices.forEach(d => {
+          try { d.hub_health = 'error'; } catch(e) {}
+        });
+      }
+
       // Enrich end-to-end Speak progress using device last_ack
       devices.forEach(d => {
         try {
@@ -249,7 +266,8 @@ async function loadAudioStatus(){
       const hubLatest = data.hub_latest_version || null;
       const hubUpd = (typeof data.hub_update_available === 'boolean') ? data.hub_update_available : null;
       const hubErr = data.hub_update_error || null;
-      renderBanner({ otaLatest, hubVer, hubLatest, hubUpd, hubErr });
+      const hubHealth = hubHealthObj ? (hubHealthOk ? 'ok' : 'error') : null;
+      renderBanner({ otaLatest, hubVer, hubLatest, hubUpd, hubErr, hubHealth });
       render(devices, otaLatest);
     } catch (e) {
       renderBanner(null);
