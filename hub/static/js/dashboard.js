@@ -238,10 +238,23 @@ async function loadAudioStatus(){
     // Optional hub health panel (if we have /ui/health)
     if (info.hubHealthDetail && typeof info.hubHealthDetail === 'object') {
       const hd = info.hubHealthDetail;
-      const overall = String(hd.overall || (hd.ok ? 'ok' : 'unknown')).toLowerCase();
-      const mqttOk = (hd.mqtt && typeof hd.mqtt.ok === 'boolean') ? hd.mqtt.ok : null;
-      const audioOk = (hd.audio && typeof hd.audio.ok === 'boolean') ? hd.audio.ok : null;
-      const elOk = (hd.elevenlabs && typeof hd.elevenlabs.ok === 'boolean') ? hd.elevenlabs.ok : null;
+      const overall = String(hd.ok ? 'ok' : 'error').toLowerCase();
+
+      const checks = (hd.hub_health && hd.hub_health.checks)
+        ? hd.hub_health.checks
+        : null;
+
+      const mqttOk = (checks && checks.mqtt_tcp && typeof checks.mqtt_tcp.ok === 'boolean')
+        ? checks.mqtt_tcp.ok
+        : null;
+
+      const audioOk = (checks && checks.audio_server && typeof checks.audio_server.ok === 'boolean')
+        ? checks.audio_server.ok
+        : null;
+
+      const elOk = (checks && checks.elevenlabs_api && typeof checks.elevenlabs_api.ok === 'boolean')
+        ? checks.elevenlabs_api.ok
+        : null;
 
       const pill = (v) => {
         if (v === true) return '<span class="pill">OK</span>';
@@ -250,14 +263,14 @@ async function loadAudioStatus(){
       };
 
       const extra = [];
-      if (hd.audio && hd.audio.cache_dir) {
-        extra.push(`<div class="muted">Audio dir: ${esc(hd.audio.cache_dir)}</div>`);
+      if (checks && checks.audio_cache_dir && checks.audio_cache_dir.path) {
+        extra.push(`<div class="muted">Audio dir: ${esc(checks.audio_cache_dir.path)}</div>`);
       }
-      if (hd.elevenlabs && hd.elevenlabs.error) {
-        extra.push(`<div class="muted">ElevenLabs: ${esc(hd.elevenlabs.error)}</div>`);
+      if (checks && checks.elevenlabs_api && checks.elevenlabs_api.error) {
+        extra.push(`<div class="muted">ElevenLabs: ${esc(checks.elevenlabs_api.error)}</div>`);
       }
-      if (hd.mqtt && hd.mqtt.error) {
-        extra.push(`<div class="muted">MQTT: ${esc(hd.mqtt.error)}</div>`);
+      if (checks && checks.mqtt_tcp && checks.mqtt_tcp.error) {
+        extra.push(`<div class="muted">MQTT: ${esc(checks.mqtt_tcp.error)}</div>`);
       }
 
       parts.push(
