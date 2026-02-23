@@ -873,7 +873,25 @@ def _hub_health_snapshot() -> dict:
     # TTS config
     tts_ok, tts_err = _tts_config_check()
 
-    ok = bool(reg_ok and cache_ok and mqtt_ok and tts_ok)
+    # Audio server wiring
+    audio_ok = bool(audio_bp is not None and store_audio is not None and build_audio_url is not None)
+    audio_err = None if audio_ok else "audio_server_not_configured"
+
+    # ElevenLabs reachability (lightweight; uses cached /v1/voices call)
+    el_ok = None
+    el_err = None
+    el_checked_at = None
+    try:
+        el_info = _get_elevenlabs_voices_cached(force=False)
+        el_ok = bool(el_info.get("ok"))
+        el_err = el_info.get("error")
+        el_checked_at = el_info.get("checked_at")
+    except Exception as e:
+        el_ok = False
+        el_err = str(e)
+
+    # Treat el_ok=None as "unknown" (don’t fail hard), but el_ok=False fails health.
+    ok = bool(reg_ok and cache_ok and mqtt_ok and tts_ok and audio_ok and (el_ok is not False))
 
     return {
         "ok": ok,
@@ -883,6 +901,8 @@ def _hub_health_snapshot() -> dict:
             "audio_cache_dir": {"ok": cache_ok, "error": cache_err, "path": str(cache_dir)},
             "mqtt_tcp": {"ok": mqtt_ok, "error": mqtt_err, "host": mqtt_host, "port": int(mqtt_port)},
             "tts_config": {"ok": tts_ok, "error": tts_err},
+            "audio_server": {"ok": audio_ok, "error": audio_err},
+            "elevenlabs_api": {"ok": el_ok, "error": el_err, "checked_at": el_checked_at},
         },
     }
 
@@ -1752,6 +1772,160 @@ def health():
     code = 200 if snap.get("ok") else 503
     return jsonify(snap), code
 
+
+# Authenticated hub health endpoint for the dashboard
+@app.get("/ui/health")
+def ui_health():
+    """Authenticated hub health endpoint for the dashboard."""
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    snap = _hub_health_snapshot()
+    audio = _audio_cache_status()
+
+    ota_latest = _read_ota_latest_version()
+    hub_status = _hub_update_status_cached(force=False)
+
+    return jsonify({
+        "ok": bool(snap.get("ok")),
+        "hub_health": snap,
+        "audio_cache": audio,
+        "ota_latest_version": ota_latest,
+        "hub_version": hub_status.get("hub_version"),
+        "hub_latest_version": hub_status.get("hub_latest_version"),
+        "hub_update_available": hub_status.get("hub_update_available"),
+        "hub_checked_at": hub_status.get("hub_checked_at"),
+        "hub_update_error": hub_status.get("hub_update_error"),
+    })
+# --- UI cancel endpoint ---
+
+@app.post("/ui/speak/retry")
+def ui_speak_retry():
+    """Retry the most recent speak for a device (re-send the already-generated audio).
+
+    Body:
+      {"device_id": "...", "command_id": "optional", "ttl_sec": 300, "priority": 5}
+
+    Uses devices.json fields:
+      - rec.ota_token
+      - rec.last_speak.audio_id / ext / text
+
+    Creates a NEW command_id by default so the device does not dedupe it.
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    last = rec.get("last_speak") if isinstance(rec.get("last_speak"), dict) else None
+    if not isinstance(last, dict):
+        return jsonify({"ok": False, "error": "no_last_speak"}), 400
+
+    audio_id = str(last.get("audio_id") or "").strip()
+    ext = str(last.get("ext") or "wav").strip().lstrip(".")
+    text = str(last.get("text") or "").strip()
+
+    if not audio_id:
+        return jsonify({"ok": False, "error": "no_last_speak_audio_id"}), 400
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    ota_token = str(rec.get("ota_token") or "").strip()
+    if not ota_token:
+        return jsonify({"ok": False, "error": "missing_ota_token"}), 500
+
+    if build_audio_url is None:
+        return jsonify({"ok": False, "error": "audio_server_not_configured"}), 500
+
+    try:
+        url = build_audio_url(
+            base_url=HUB_BASE_URL,
+            audio_id=audio_id,
+            device_id=device_id,
+            token=ota_token,
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"audio_url_failed:{e}"}), 500
+
+    # New command id (avoid device-side dedupe)
+    command_id = sanitize_topic_id(body.get("command_id") or f"speakretry-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    # Track retry in registry for UI
+    try:
+        rec_last_speak = {
+            "command_id": command_id,
+            "issued_at": int(time.time()),
+            "sent_at": None,
+            "state": "generated",
+            "text": text[:200],
+            "voice_id": str(last.get("voice_id") or "")[:128],
+            "ext": ext,
+            "audio_id": audio_id,
+            "retry_of": str(last.get("command_id") or "")[:128],
+        }
+        rec["last_speak"] = rec_last_speak
+        reg[device_id] = rec
+        write_registry(reg)
+    except Exception:
+        pass
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="speak",
+        params={
+            "url": url,
+            "audio_id": audio_id,
+            "text": text,
+            "ext": ext,
+        },
+        ttl_sec=ttl_sec if ttl_sec is not None else 300,
+        priority=priority if priority is not None else 5,
+    )
+
+    try:
+        publish_command(site_id, device_id, payload)
+        _mark_sent_in_registry(reg, device_id, command_id, "speak")
+
+        # Mark last_speak as sent
+        try:
+            rec2 = reg.get(device_id)
+            if isinstance(rec2, dict):
+                ls = rec2.get("last_speak")
+                if isinstance(ls, dict) and str(ls.get("command_id") or "") == command_id:
+                    ls = dict(ls)
+                    ls["sent_at"] = int(time.time())
+                    ls["state"] = "sent"
+                    rec2["last_speak"] = ls
+                    reg[device_id] = rec2
+        except Exception:
+            pass
+
+        write_registry(reg)
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "device_id": device_id,
+        "command_id": command_id,
+        "audio_id": audio_id,
+        "url": url,
+    })
+
 @app.get("/ui/status")
 def ui_status():
     ar = require_ui_auth()
@@ -1874,6 +2048,18 @@ def ui_status():
             drec["warning"] = "device_offline"
         else:
             drec["warning"] = None
+
+        # --- Stalled speak detection (dashboard actions) ---
+        stalled = False
+        stalled_reason = None
+        ls2 = drec.get("last_speak") if isinstance(drec.get("last_speak"), dict) else None
+        if isinstance(ls2, dict):
+            st = str(ls2.get("state") or "").lower()
+            if st in ("timeout", "error"):
+                stalled = True
+                stalled_reason = ls2.get("error") or st
+        drec["speak_stalled"] = stalled
+        drec["speak_stalled_reason"] = stalled_reason
 
         # --- Reconcile last_speak state with last_ack (end-to-end progress) ---
         # We want the UI to show an end-to-end pipeline:
