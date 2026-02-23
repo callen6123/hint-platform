@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, abort, render_template
+from flask import Flask, request, jsonify, send_file, abort, render_template, Response
 from jinja2 import ChoiceLoader, FileSystemLoader
 import os
 import sys
@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
 import urllib.error
+
+import socket
 
 # Ensure repo root is on sys.path even when this file is executed as a script
 # (e.g. ExecStart=/usr/bin/python3 /home/hub/hint-platform/hub/hub_pair.py)
@@ -804,6 +806,85 @@ def mqtt_admin_cfg() -> tuple[str, int, str, str]:
     user = os.environ.get("HUB_MQTT_USER", "hubadmin")
     pw = os.environ.get("HUB_MQTT_PASS", "devpass123")
     return host, port, user, pw
+
+
+# --- Hub health helpers ---
+
+def _tcp_check(host: str, port: int, timeout_sec: float = 2.0) -> tuple[bool, str | None]:
+    try:
+        with socket.create_connection((host, int(port)), timeout=float(timeout_sec)):
+            return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _dir_writable_check(p: Path) -> tuple[bool, str | None]:
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        test = p / f".writecheck.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        test.write_text("ok\n", encoding="utf-8")
+        try:
+            test.unlink()
+        except Exception:
+            pass
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _registry_rw_check() -> tuple[bool, str | None]:
+    # Validate we can read and write devices.json atomically (without sudo)
+    try:
+        reg = read_registry()
+        if not isinstance(reg, dict):
+            reg = {}
+        # Do NOT mutate content; just perform a write/read round-trip to ensure perms.
+        write_registry(reg)
+        _ = read_registry()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _tts_config_check() -> tuple[bool, str | None]:
+    # Keep this lightweight; we don't want to burn API quota on a health ping.
+    api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
+    if not api_key:
+        return False, "missing_ELEVENLABS_API_KEY"
+    if tts is None or not hasattr(tts, "synthesize"):
+        return False, "tts_module_not_configured"
+    return True, None
+
+
+def _hub_health_snapshot() -> dict:
+    now_iso = utc_now_iso()
+
+    # Registry
+    reg_ok, reg_err = _registry_rw_check()
+
+    # Audio cache dir
+    cache_dir = Path(os.environ.get("HINT_AUDIO_CACHE_DIR", "/var/lib/hint/audio_cache"))
+    cache_ok, cache_err = _dir_writable_check(cache_dir)
+
+    # MQTT connectivity (TCP reachability)
+    mqtt_host, mqtt_port, _user, _pw = mqtt_admin_cfg()
+    mqtt_ok, mqtt_err = _tcp_check(mqtt_host, mqtt_port, timeout_sec=2.0)
+
+    # TTS config
+    tts_ok, tts_err = _tts_config_check()
+
+    ok = bool(reg_ok and cache_ok and mqtt_ok and tts_ok)
+
+    return {
+        "ok": ok,
+        "ts": now_iso,
+        "checks": {
+            "registry_rw": {"ok": reg_ok, "error": reg_err},
+            "audio_cache_dir": {"ok": cache_ok, "error": cache_err, "path": str(cache_dir)},
+            "mqtt_tcp": {"ok": mqtt_ok, "error": mqtt_err, "host": mqtt_host, "port": int(mqtt_port)},
+            "tts_config": {"ok": tts_ok, "error": tts_err},
+        },
+    }
 
 
 # --- OTA/hub update helpers ---
@@ -1658,6 +1739,19 @@ def ui_speak():
         "url": url,
     })
 
+@app.get("/health")
+def health():
+    """Hub health endpoint.
+
+    Intended for devices and external monitors.
+    Does NOT require UI auth.
+
+    Returns 200 when all checks pass, otherwise 503.
+    """
+    snap = _hub_health_snapshot()
+    code = 200 if snap.get("ok") else 503
+    return jsonify(snap), code
+
 @app.get("/ui/status")
 def ui_status():
     ar = require_ui_auth()
@@ -1899,9 +1993,12 @@ def ui_status():
     ota_latest = _read_ota_latest_version()
     hub_status = _hub_update_status_cached(force=False)
 
+    hub_health = _hub_health_snapshot()
+
     return jsonify({
         "ok": True,
         "devices": devices,
+        "hub_health": hub_health,
         "ota_latest_version": ota_latest,
         "hub_version": hub_status.get("hub_version"),
         "hub_latest_version": hub_status.get("hub_latest_version"),
