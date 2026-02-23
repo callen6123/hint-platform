@@ -1,6 +1,10 @@
 (function(){
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
+
+  // Cached hub health snapshot from /ui/health
+  let _hubHealth = null;
+  let _hubHealthLoadedAt = 0;
   function fmtBytes(n){
   n = Number(n||0);
   if (!isFinite(n)) return '0';
@@ -129,7 +133,8 @@ async function loadAudioStatus(){
   function hubHealthLabel(h){
     h = String(h || '').toLowerCase();
     if (h === 'ok') return 'Hub OK';
-    if (h === 'error') return 'Hub unreachable';
+    if (h === 'degraded') return 'Hub degraded';
+    if (h === 'error') return 'Hub error';
     return 'Hub unknown';
   }
 
@@ -230,13 +235,69 @@ async function loadAudioStatus(){
       parts.push(`<div class="muted">Hub update check error: ${String(info.hubErr)}</div>`);
     }
 
+    // Optional hub health panel (if we have /ui/health)
+    if (info.hubHealthDetail && typeof info.hubHealthDetail === 'object') {
+      const hd = info.hubHealthDetail;
+      const overall = String(hd.overall || (hd.ok ? 'ok' : 'unknown')).toLowerCase();
+      const mqttOk = (hd.mqtt && typeof hd.mqtt.ok === 'boolean') ? hd.mqtt.ok : null;
+      const audioOk = (hd.audio && typeof hd.audio.ok === 'boolean') ? hd.audio.ok : null;
+      const elOk = (hd.elevenlabs && typeof hd.elevenlabs.ok === 'boolean') ? hd.elevenlabs.ok : null;
+
+      const pill = (v) => {
+        if (v === true) return '<span class="pill">OK</span>';
+        if (v === false) return '<span class="pill">ERR</span>';
+        return '<span class="muted">—</span>';
+      };
+
+      const extra = [];
+      if (hd.audio && hd.audio.cache_dir) {
+        extra.push(`<div class="muted">Audio dir: ${esc(hd.audio.cache_dir)}</div>`);
+      }
+      if (hd.elevenlabs && hd.elevenlabs.error) {
+        extra.push(`<div class="muted">ElevenLabs: ${esc(hd.elevenlabs.error)}</div>`);
+      }
+      if (hd.mqtt && hd.mqtt.error) {
+        extra.push(`<div class="muted">MQTT: ${esc(hd.mqtt.error)}</div>`);
+      }
+
+      parts.push(
+        `<div style="margin-top:10px;">
+          <h3 style="margin:0 0 8px 0; font-size:14px;">Hub Health</h3>
+          <div><b>Overall:</b> <span class="pill">${esc(hubHealthLabel(overall))}</span></div>
+          <div><b>MQTT:</b> ${pill(mqttOk)} <span class="muted">${mqttOk === false ? '(not connected)' : ''}</span></div>
+          <div><b>Audio:</b> ${pill(audioOk)}</div>
+          <div><b>ElevenLabs:</b> ${pill(elOk)} <span class="muted">${elOk === false ? '(unreachable)' : ''}</span></div>
+          ${extra.join('')}
+        </div>`
+      );
+    }
+
     b.innerHTML = `<h3 style="margin:0 0 8px 0; font-size:14px;">Updates</h3>` + parts.join('');
     b.style.display = '';
   }
 
   async function refresh(){
     try {
-      const data = await api('/ui/status', 'GET');
+      // Fetch status + health in parallel; health is optional (older hub builds may not have it).
+      const statusPromise = api('/ui/status', 'GET');
+      const healthPromise = fetch('/ui/health', { method: 'GET' })
+        .then(async (r) => {
+          const t = await r.text();
+          let j;
+          try { j = JSON.parse(t); } catch { j = null; }
+          if (!r.ok) return null;
+          return j;
+        })
+        .catch(() => null);
+
+      const data = await statusPromise;
+      const health = await healthPromise;
+
+      if (health && typeof health === 'object') {
+        _hubHealth = health;
+        _hubHealthLoadedAt = Date.now();
+      }
+
       const devices = data.devices || [];
 
       // Hub health (from /ui/status). If the hub reports an error state,
@@ -249,25 +310,47 @@ async function loadAudioStatus(){
         });
       }
 
-      // Enrich end-to-end Speak progress using device last_ack
+      // Enrich end-to-end Speak progress.
+      // Prefer matching on command_id. If command_id differs but audio_id matches, still update.
       devices.forEach(d => {
         try {
           const ls = d.last_speak;
           if (!ls || !ls.command_id) return;
           const ack = d.last_ack;
-          if (!ack || !ack.command_id) return;
-          if (String(ack.command_id || '') !== String(ls.command_id || '')) return;
+          if (!ack || !ack.status) return;
+
+          const sameCmd = String(ack.command_id || '') === String(ls.command_id || '');
+          const sameAudio = (ack.details && typeof ack.details === 'object') &&
+                            String(ack.details.audio_id || '') &&
+                            String(ack.details.audio_id || '') === String(ls.audio_id || '');
+
+          if (!sameCmd && !sameAudio) return;
+
           const st = String(ack.status || '').toLowerCase();
           if (st) ls.state = st; // accepted/completed/error
+
+          // capture ack timestamp for age/timeout logic
+          if (typeof ack.ts === 'number') ls.ack_ts = ack.ts;
         } catch(e) {}
       });
+
       const otaLatest = data.ota_latest_version || null;
       const hubVer = data.hub_version || null;
       const hubLatest = data.hub_latest_version || null;
       const hubUpd = (typeof data.hub_update_available === 'boolean') ? data.hub_update_available : null;
       const hubErr = data.hub_update_error || null;
       const hubHealth = hubHealthObj ? (hubHealthOk ? 'ok' : 'error') : null;
-      renderBanner({ otaLatest, hubVer, hubLatest, hubUpd, hubErr, hubHealth });
+
+      renderBanner({
+        otaLatest,
+        hubVer,
+        hubLatest,
+        hubUpd,
+        hubErr,
+        hubHealth,
+        hubHealthDetail: _hubHealth && (_hubHealth.ok === true || _hubHealth.overall) ? _hubHealth : null,
+      });
+
       render(devices, otaLatest);
     } catch (e) {
       renderBanner(null);
@@ -533,7 +616,7 @@ async function loadAudioStatus(){
   refresh();
   loadAudioStatus();
   setInterval(() => {
-    refresh();
+    refresh(); // includes /ui/health best-effort
     rolloutStatusTick();
     loadAudioStatus();
   }, 5000);
