@@ -1745,7 +1745,7 @@ def ui_beep():
 
 
 # Back-compat alias for UI callers
-@app.post("/ui/speaker-test")
+@app.post("/ui/device/speaker-test")
 def ui_speaker_test():
     return ui_beep()
 
