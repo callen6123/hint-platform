@@ -2,6 +2,63 @@
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
 
+  // Cached device list from /ui/status for UI controls
+  let _devicesCache = [];
+
+  // Device Actions controls (optional; only present if dashboard.html includes them)
+  const actionDeviceSelect = $("actionDeviceSelect");
+  const beepBtn = $("beepBtn");
+  const speakerTestBtn = $("speakerTestBtn");
+
+  function populateActionDeviceSelect(devices){
+    if (!actionDeviceSelect) return;
+
+    const list = Array.isArray(devices) ? devices.slice() : [];
+    list.sort((a,b) => {
+      const an = String((a && (a.friendly_name || a.device_id)) || '');
+      const bn = String((b && (b.friendly_name || b.device_id)) || '');
+      return an.localeCompare(bn);
+    });
+
+    const prev = actionDeviceSelect.value;
+    actionDeviceSelect.innerHTML = '';
+
+    if (!list.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No devices';
+      actionDeviceSelect.appendChild(opt);
+      actionDeviceSelect.disabled = true;
+      if (beepBtn) beepBtn.disabled = true;
+      if (speakerTestBtn) speakerTestBtn.disabled = true;
+      return;
+    }
+
+    actionDeviceSelect.disabled = false;
+    if (beepBtn) beepBtn.disabled = false;
+    if (speakerTestBtn) speakerTestBtn.disabled = false;
+
+    for (const d of list) {
+      const did = String((d && d.device_id) || '');
+      if (!did) continue;
+      const label = String((d && d.friendly_name) || did);
+      const opt = document.createElement('option');
+      opt.value = did;
+      opt.textContent = label;
+      actionDeviceSelect.appendChild(opt);
+    }
+
+    // Restore previous selection if still present
+    if (prev && Array.from(actionDeviceSelect.options).some(o => o.value === prev)) {
+      actionDeviceSelect.value = prev;
+    }
+  }
+
+  async function runDeviceAction(path, deviceId){
+    if (!deviceId) throw new Error('device_id_required');
+    return api(path, 'POST', { device_id: deviceId });
+  }
+
   // Cached hub health snapshot from /ui/health
   let _hubHealth = null;
   let _hubHealthLoadedAt = 0;
@@ -409,6 +466,8 @@ async function loadAudioStatus(){
       }
 
       const devices = data.devices || [];
+      _devicesCache = Array.isArray(devices) ? devices : [];
+      populateActionDeviceSelect(_devicesCache);
 
       // Hub health (from /ui/status). If the hub reports an error state,
       // annotate devices so `renderWarnings()` can show it.
@@ -729,6 +788,37 @@ async function loadAudioStatus(){
       await refresh();
     } catch (e) {
       log(`Build+Update All failed: ${e.message}`);
+    }
+  });
+
+  // Device Actions wiring (beep + speaker test)
+  if (beepBtn) beepBtn.addEventListener('click', async () => {
+    try {
+      const did = actionDeviceSelect ? actionDeviceSelect.value : '';
+      beepBtn.disabled = true;
+      log(`Beep: ${did}...`);
+      const r = await runDeviceAction('/ui/device/beep', did);
+      log(`Beep result: ${JSON.stringify(r)}`);
+      await refresh();
+    } catch (e) {
+      log(`Beep failed: ${e.message}`);
+    } finally {
+      beepBtn.disabled = false;
+    }
+  });
+
+  if (speakerTestBtn) speakerTestBtn.addEventListener('click', async () => {
+    try {
+      const did = actionDeviceSelect ? actionDeviceSelect.value : '';
+      speakerTestBtn.disabled = true;
+      log(`Speaker test: ${did}...`);
+      const r = await runDeviceAction('/ui/device/speaker-test', did);
+      log(`Speaker test result: ${JSON.stringify(r)}`);
+      await refresh();
+    } catch (e) {
+      log(`Speaker test failed: ${e.message}`);
+    } finally {
+      speakerTestBtn.disabled = false;
     }
   });
 

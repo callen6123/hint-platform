@@ -1667,6 +1667,88 @@ def ui_speak_stop():
         "mode": "stop",
     })
 
+
+# --- UI device speaker test (beep) ---
+
+@app.post("/ui/beep")
+def ui_beep():
+    """Send a short speaker test command to a device.
+
+    Body:
+      {"device_id": "...", "command_id": "optional", "ttl_sec": 60, "priority": 10}
+
+    The device agent should implement cmd="beep" (or alias) and play a short bundled beep WAV.
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"beep-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    # Default short TTL + high-ish priority for a speaker test.
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="beep",
+        params={},
+        ttl_sec=ttl_sec if ttl_sec is not None else 60,
+        priority=priority if priority is not None else 10,
+    )
+
+    # Optional: track the last beep command for UI/debugging.
+    try:
+        rec["last_beep"] = {
+            "command_id": command_id,
+            "issued_at": int(time.time()),
+            "state": "sent",
+        }
+        reg[device_id] = rec
+        write_registry(reg)
+    except Exception:
+        pass
+
+    # Audit log: request intent (publish_command also logs cmd_issued/cmd_published).
+    _append_hub_cmd_log({
+        "event": "beep_requested",
+        "site_id": str(site_id),
+        "device_id": str(device_id),
+        "command_id": str(command_id),
+    })
+
+    try:
+        publish_command(site_id, device_id, payload)
+        _mark_sent_in_registry(reg, device_id, command_id, "beep")
+        write_registry(reg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "device_id": device_id,
+        "command_id": command_id,
+    })
+
+
+# Back-compat alias for UI callers
+@app.post("/ui/speaker_test")
+def ui_speaker_test():
+    return ui_beep()
+
 # --- UI TTS speak endpoint ---
 
 @app.post("/ui/speak")

@@ -20,6 +20,9 @@
       <button id="updateAll">Update All</button>
       <button id="audioCleanup">Clean Audio Cache</button>
       <button id="buildUpdateAll">Build+Update All</button>
+      <span class="muted" style="margin-left:10px;">Audio:</span>
+      <button id="beepBtn" title="Send a short beep to a device">Beep</button>
+      <button id="speakerTestBtn" title="Run the device speaker test (beep)">Speaker Test</button>
     </div>
   </header>
   <main>
@@ -48,6 +51,16 @@
       </div>
       <div class="kv" id="rolloutStatus" style="margin-top:8px;">
         <div class="muted">No rollout running.</div>
+      </div>
+    </div>
+
+    <div class="panel" id="deviceActionPanel">
+      <h3>Device Actions</h3>
+      <div class="controls">
+        <label>Target device:
+          <select id="actionDeviceSelect"></select>
+        </label>
+        <span class="muted">Use Beep/Speaker Test for quick audio verification.</span>
       </div>
     </div>
 
