@@ -13,6 +13,7 @@ import urllib.request
 import urllib.error
 
 import socket
+import threading
 
 # Ensure repo root is on sys.path even when this file is executed as a script
 # (e.g. ExecStart=/usr/bin/python3 /home/hub/hint-platform/hub/hub_pair.py)
@@ -80,6 +81,30 @@ PAIR_CODE = "483921"  # you will type this into the device setup page
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
+
+# --- Hub audit log (append-only JSONL) ---
+HUB_LOG_DIR = Path("/var/lib/hint/logs")
+HUB_CMD_LOG_PATH = HUB_LOG_DIR / "hub_cmd.log"
+_HUB_CMD_LOG_LOCK = threading.Lock()
+
+def _append_hub_cmd_log(event: dict) -> None:
+    """Append a single JSON line to /var/lib/hint/logs/hub_cmd.log (best-effort)."""
+    try:
+        if not isinstance(event, dict):
+            return
+
+        # Normalize timestamp
+        event = dict(event)
+        event.setdefault("ts", utc_now_iso())
+
+        HUB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, sort_keys=True)
+
+        with _HUB_CMD_LOG_LOCK:
+            with open(HUB_CMD_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        return
 
 # --- Registry and config helpers (atomic, no sudo) ---
 
@@ -1115,23 +1140,39 @@ def _mark_sent_in_registry(reg: dict, device_id: str, cmd_id: str, cmd: str) -> 
 def publish_command(site_id: str, device_id: str, payload: dict) -> None:
     host, port, user, pw = mqtt_admin_cfg()
     topic = f"site/{site_id}/device/{device_id}/cmd"
-    subprocess.check_call(
-        [
-            "mosquitto_pub",
-            "-h",
-            host,
-            "-p",
-            str(port),
-            "-u",
-            user,
-            "-P",
-            pw,
-            "-t",
-            topic,
-            "-m",
-            json.dumps(payload),
-        ]
-    )
+
+    try:
+        subprocess.check_call(
+            [
+                "mosquitto_pub",
+                "-h",
+                host,
+                "-p",
+                str(port),
+                "-u",
+                user,
+                "-P",
+                pw,
+                "-t",
+                topic,
+                "-m",
+                json.dumps(payload),
+            ]
+        )
+    finally:
+        # Always attempt to log what we tried to send (even if publish raises)
+        try:
+            _append_hub_cmd_log({
+                "event": "cmd_sent",
+                "site_id": str(site_id),
+                "device_id": str(device_id),
+                "topic": topic,
+                "command_id": str((payload or {}).get("command_id") or ""),
+                "cmd": str((payload or {}).get("cmd") or ""),
+                "payload": payload if isinstance(payload, dict) else {},
+            })
+        except Exception:
+            pass
 
 def publish_update(site_id: str, device_id: str, command_id: str) -> None:
     payload = make_command_payload(command_id=command_id, cmd="update")
@@ -1765,6 +1806,16 @@ def ui_speak():
         reg[device_id] = rec
         # Write now so the dashboard can show the job even if MQTT publish fails.
         write_registry(reg)
+        _append_hub_cmd_log({
+            "event": "speak_generated",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "command_id": str(command_id),
+            "audio_id": str(audio_id),
+            "ext": str(ext),
+            "voice_id": str(tts_opts.get("voice_id") or ""),
+            "text": text[:200],
+        })
     except Exception:
         pass
 
@@ -1800,6 +1851,15 @@ def ui_speak():
             pass
 
         write_registry(reg)
+
+        # Log speak_published event
+        _append_hub_cmd_log({
+            "event": "speak_published",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "command_id": str(command_id),
+            "audio_id": str(audio_id),
+        })
 
         # Best-effort cleanup of hub audio cache after storing/serving audio
         _cleanup_audio_cache_if_needed()
@@ -1935,6 +1995,16 @@ def ui_speak_retry():
         rec["last_speak"] = rec_last_speak
         reg[device_id] = rec
         write_registry(reg)
+        _append_hub_cmd_log({
+            "event": "speak_generated",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "command_id": str(command_id),
+            "audio_id": str(audio_id),
+            "ext": str(ext),
+            "voice_id": str(last.get("voice_id") or ""),
+            "text": text[:200],
+        })
     except Exception:
         pass
 
@@ -1970,6 +2040,14 @@ def ui_speak_retry():
             pass
 
         write_registry(reg)
+
+        _append_hub_cmd_log({
+            "event": "speak_published",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "command_id": str(command_id),
+            "audio_id": str(audio_id),
+        })
 
     except Exception as e:
         return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
@@ -2271,6 +2349,26 @@ def ui_status():
             write_registry(reg)
         except Exception:
             pass
+#
+# --- Device ACK handler: log inbound ACKs after storing in registry ---
+#
+
+# Insert logging of inbound ACKs after writing rec["last_ack"] in the appropriate handler.
+# (The actual handler is not shown in the excerpt, but the following is the pattern:)
+#
+# After:
+#     rec["last_ack"] = payload
+# Insert:
+#             try:
+#                 _append_hub_cmd_log({
+#                     "event": "ack_received",
+#                     "site_id": str(rec.get("site_id") or "demo"),
+#                     "device_id": str(rec.get("device_id") or device_id),
+#                     "command_id": str((rec.get("last_ack") or {}).get("command_id") or ""),
+#                     "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},
+#                 })
+#             except Exception:
+#                 pass
 
     devices.sort(key=lambda r: str(r.get("device_id", "")))
     ota_latest = _read_ota_latest_version()

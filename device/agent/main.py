@@ -27,6 +27,15 @@ AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SPEAK_DOWNLOAD_TIMEOUT = int(os.environ.get("HINT_SPEAK_DOWNLOAD_TIMEOUT_SEC", "30"))
 SPEAK_MAX_BYTES = int(os.environ.get("HINT_SPEAK_MAX_BYTES", str(10 * 1024 * 1024)))  # 10MB
 
+# Audio output selection
+# - If HINT_AUDIO_CARDID is set (e.g., "Device"), we prefer that ALSA card id.
+# - Otherwise we auto-detect a USB card from /proc/asound/cards.
+HINT_AUDIO_CARDID = os.environ.get("HINT_AUDIO_CARDID", "").strip() or None
+
+# Optional ALSA device string override. If set, used as-is for aplay -D.
+# Examples: "plughw:Device,0", "default", "sysdefault:CARD=Device"
+HINT_AUDIO_ALSA_DEVICE = os.environ.get("HINT_AUDIO_ALSA_DEVICE", "").strip() or None
+
 # State publish behavior
 HEARTBEAT_SEC = int(os.environ.get("HINT_STATE_HEARTBEAT_SEC", "30"))
 HEARTBEAT_SEC = max(5, min(HEARTBEAT_SEC, 3600))
@@ -79,25 +88,42 @@ def current_versions() -> dict:
 def _find_usb_card() -> str | None:
     # Parse /proc/asound/cards. Example lines:
     #  0 [Device         ]: USB-Audio - USB Audio Device
+    # If HINT_AUDIO_CARDID is set, prefer that exact card id.
     try:
         txt = Path("/proc/asound/cards").read_text()
     except Exception:
         return None
 
+    # First pass: exact match to configured card id
+    if HINT_AUDIO_CARDID:
+        for line in txt.splitlines():
+            if "[" in line and "]" in line and ":" in line:
+                cardid = line.split("[", 1)[1].split("]", 1)[0].strip()
+                if cardid == HINT_AUDIO_CARDID:
+                    return cardid
+
+    # Second pass: first USB-ish card
     for line in txt.splitlines():
-        # lines with: 'N [CARDID ]: ... - ...'
         if "[" in line and "]" in line and ":" in line:
-            # crude but effective
             if "USB" in line or "usb" in line:
-                # extract CARDID between [...]
                 cardid = line.split("[", 1)[1].split("]", 1)[0].strip()
                 if cardid:
                     return cardid
+
     return None
 
 
 def _aplay_cmd_for(path: Path) -> list[str]:
+    """Return the *primary* player command for a file."""
+
+    # Explicit override: the user can force a full ALSA device string.
+    if HINT_AUDIO_ALSA_DEVICE:
+        if path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
+            return ["mpg123", str(path)]
+        return ["aplay", "-D", HINT_AUDIO_ALSA_DEVICE, str(path)]
+
     card = _find_usb_card()
+
     if path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
         if card:
             return ["mpg123", "-a", f"plughw:{card},0", str(path)]
@@ -106,8 +132,40 @@ def _aplay_cmd_for(path: Path) -> list[str]:
     if card:
         # Use plughw so ALSA can convert formats (e.g., U8->S16_LE) for USB devices.
         return ["aplay", "-D", f"plughw:{card},0", str(path)]
+
     return ["aplay", str(path)]
 
+def _player_cmd_candidates(path: Path) -> list[list[str]]:
+    """Return a list of player commands to try in order."""
+    primary = _aplay_cmd_for(path)
+    candidates: list[list[str]] = [primary]
+
+    # WAV fallbacks
+    if primary and primary[0] == "aplay":
+        # If primary uses -D <device>, try default device, then bare.
+        if "-D" in primary:
+            candidates.append(["aplay", "-D", "default", str(path)])
+        candidates.append(["aplay", str(path)])
+
+        # PulseAudio fallback if present (WAV)
+        if shutil.which("paplay") and path.suffix.lower() in {".wav", ".wave"}:
+            candidates.append(["paplay", str(path)])
+
+    # MP3 fallbacks
+    if primary and primary[0] == "mpg123":
+        candidates.append(["mpg123", str(path)])
+
+    # De-dup while preserving order
+    uniq: list[list[str]] = []
+    seen = set()
+    for c in candidates:
+        t = tuple(c)
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(c)
+
+    return uniq
 
 # --- Helper: sniff audio type by magic bytes
 def sniff_audio_type(path: Path) -> str:
@@ -230,6 +288,34 @@ def play_file(path: Path) -> None:
 def play() -> None:
     play_file(AUDIO_PATH)
 
+def _write_beep_wav(dst: Path, *, hz: float = 880.0, duration_sec: float = 0.25, rate: int = 16000) -> None:
+    """Generate a short 16-bit PCM mono beep WAV."""
+    import math
+    import wave
+    import struct
+
+    n = max(1, int(duration_sec * rate))
+    amp = 0.25  # keep it quiet-ish
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(dst), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)  # 16-bit
+        w.setframerate(rate)
+        for i in range(n):
+            t = i / rate
+            s = math.sin(2.0 * math.pi * hz * t)
+
+            # short fade-in/out to avoid clicks
+            fade = 1.0
+            edge = int(0.02 * rate)
+            if i < edge:
+                fade = i / max(1, edge)
+            elif i > (n - edge):
+                fade = max(0.0, (n - i) / max(1, edge))
+
+            v = int(max(-1.0, min(1.0, s * amp * fade)) * 32767)
+            w.writeframesraw(struct.pack("<h", v))
 
 def sha256_file(p: Path) -> str:
     h = hashlib.sha256()
@@ -454,8 +540,7 @@ def main() -> None:
                 pass
             time.sleep(HINT_HUB_HEALTH_INTERVAL_SEC)
 
-    # Start hub health thread
-    threading.Thread(target=hub_health_loop, name="hub-health", daemon=True).start()
+    # (Hub health thread will be started after MQTT client is ready.)
 
     last_state: str | None = None
     last_state_publish_ts: float = 0.0
@@ -576,9 +661,8 @@ def main() -> None:
     def enqueue_job(job: dict) -> None:
         job_q.put(job)
 
-    def _spawn_player(path: Path) -> subprocess.Popen:
-        """Spawn a player process for `path` and return the running Popen (in its own process group)."""
-        cmd = _aplay_cmd_for(path)
+    def _spawn_player(cmd: list[str]) -> subprocess.Popen:
+        """Spawn a player process for a given command list."""
         return subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -586,7 +670,6 @@ def main() -> None:
             text=True,
             start_new_session=True,
         )
-
 
     def _wait_player(p: subprocess.Popen) -> tuple[int, str, str]:
         """Wait for player and return (rc, stdout, stderr)."""
@@ -625,30 +708,76 @@ def main() -> None:
                     path = download_speak_audio(url, audio_id=str(audio_id) if audio_id else None)
                     atype = sniff_audio_type(path)
 
+                elif jtype == "beep":
+                    path = AUDIO_CACHE_DIR / f"beep-{int(time.time())}.wav"
+                    _write_beep_wav(path)
+                    atype = "wav"
+
                 else:
                     raise RuntimeError(f"unknown_job_type:{jtype}")
 
                 # Spawn player so we can cancel it mid-playback.
-                p = _spawn_player(path)
+                # Try a fallback chain (preferred ALSA device -> default -> bare -> paplay).
+                cmd_candidates = _player_cmd_candidates(path)
 
-                with q_lock:
-                    current_proc = p
-                    playback_state = "playing"
+                rc = 1
+                out = ""
+                err = ""
+                cmd_used: list[str] | None = None
 
-                # If cancel came in during the small window between job start and spawn,
-                # stop immediately and treat as cancelled.
-                if cancel_event.is_set():
+                for cmd in cmd_candidates:
+                    cmd_used = cmd
+                    p = _spawn_player(cmd)
+
                     with q_lock:
-                        playback_state = "stopping"
-                    _kill_proc(p)
+                        current_proc = p
+                        playback_state = "playing"
 
-                rc, out, err = _wait_player(p)
+                    # If cancel came in during the small window between job start and spawn,
+                    # stop immediately and treat as cancelled.
+                    if cancel_event.is_set():
+                        with q_lock:
+                            playback_state = "stopping"
+                        _kill_proc(p)
 
-                was_cancelled = cancel_event.is_set() or (rc != 0 and playback_state == "stopping")
+                    rc, out, err = _wait_player(p)
 
+                    # If cancelled, stop trying fallbacks.
+                    if cancel_event.is_set() or playback_state == "stopping":
+                        break
+
+                    if rc == 0:
+                        break
+
+                    # If WAV format is not supported, convert to 16-bit PCM WAV via sox and retry chain.
+                    if (
+                        path.suffix.lower() in {".wav", ".wave"}
+                        and "Sample format non available" in (err or "")
+                        and shutil.which("sox")
+                    ):
+                        try:
+                            converted = path.with_suffix(".s16.wav")
+                            conv_cmd = ["sox", str(path), "-b", "16", "-e", "signed-integer", str(converted)]
+                            conv = subprocess.run(conv_cmd, capture_output=True, text=True)
+                            if conv.returncode == 0 and converted.exists():
+                                print(f"[AUDIO] converted to 16-bit PCM via {conv_cmd}: {converted}")
+                                path = converted
+                                cmd_candidates = _player_cmd_candidates(path)
+                                continue
+                        except Exception as _e:
+                            print(f"[AUDIO] conversion fallback failed: {_e}")
+
+                # Decide cancellation before clearing state.
                 with q_lock:
+                    was_cancelled = cancel_event.is_set() or (playback_state == "stopping")
                     current_proc = None
                     playback_state = "idle"
+
+                if cmd_used:
+                    if rc == 0:
+                        print(f"[AUDIO] played {path} via {cmd_used}")
+                    else:
+                        print(f"[AUDIO] play failed rc={rc} via {cmd_used}")
 
                 if out:
                     print(f"[AUDIO] stdout: {out}")
@@ -764,6 +893,15 @@ def main() -> None:
         payload.update(current_versions())
         if details is not None:
             payload["details"] = details
+
+        # Include audio device selection snapshot for debugging
+        try:
+            payload["audio_cardid"] = _find_usb_card()
+            if HINT_AUDIO_ALSA_DEVICE:
+                payload["audio_alsa_device"] = HINT_AUDIO_ALSA_DEVICE
+        except Exception:
+            pass
+
         c.publish(ack_t, json.dumps(payload), qos=1, retain=False)
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -852,6 +990,8 @@ def main() -> None:
                     "url": url,
                     "audio_id": audio_id,
                 })
+            elif cmd == "beep":
+                enqueue_job({"type": "beep", "command_id": str(cid)})
 
             else:
                 # Back-compat: treat unknown command as play test
@@ -869,6 +1009,9 @@ def main() -> None:
 
     c.connect(host, port, keepalive=30)
     c.loop_start()
+
+    # Start hub health thread (after MQTT client is ready; publish_state uses c.publish)
+    threading.Thread(target=hub_health_loop, name="hub-health", daemon=True).start()
 
     # Heartbeat: keep a retained status so the hub can see liveness.
     # We already publish immediately on state changes; this only sends a periodic refresh
