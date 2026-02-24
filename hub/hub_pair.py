@@ -106,6 +106,27 @@ def _append_hub_cmd_log(event: dict) -> None:
     except Exception:
         return
 
+
+def _redact_payload_for_log(payload: dict) -> dict:
+    """Return a shallow-redacted copy of a command payload for audit logging.
+
+    We redact secrets embedded in URLs (ota/audio tokens) and keep the rest.
+    """
+    try:
+        if not isinstance(payload, dict):
+            return {}
+        p = dict(payload)
+        params = p.get("params")
+        if isinstance(params, dict):
+            params2 = dict(params)
+            # Redact URL tokens (audio/ota)
+            if "url" in params2 and isinstance(params2.get("url"), str):
+                params2["url"] = "<redacted>"
+            p["params"] = params2
+        return p
+    except Exception:
+        return {}
+
 # --- Registry and config helpers (atomic, no sudo) ---
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -1141,6 +1162,20 @@ def publish_command(site_id: str, device_id: str, payload: dict) -> None:
     host, port, user, pw = mqtt_admin_cfg()
     topic = f"site/{site_id}/device/{device_id}/cmd"
 
+    cmd_id = str((payload or {}).get("command_id") or "")
+    cmd = str((payload or {}).get("cmd") or "")
+
+    # Log that we are about to attempt a publish.
+    _append_hub_cmd_log({
+        "event": "cmd_issued",
+        "site_id": str(site_id),
+        "device_id": str(device_id),
+        "topic": topic,
+        "command_id": cmd_id,
+        "cmd": cmd,
+        "payload": _redact_payload_for_log(payload if isinstance(payload, dict) else {}),
+    })
+
     try:
         subprocess.check_call(
             [
@@ -1159,20 +1194,29 @@ def publish_command(site_id: str, device_id: str, payload: dict) -> None:
                 json.dumps(payload),
             ]
         )
-    finally:
-        # Always attempt to log what we tried to send (even if publish raises)
-        try:
-            _append_hub_cmd_log({
-                "event": "cmd_sent",
-                "site_id": str(site_id),
-                "device_id": str(device_id),
-                "topic": topic,
-                "command_id": str((payload or {}).get("command_id") or ""),
-                "cmd": str((payload or {}).get("cmd") or ""),
-                "payload": payload if isinstance(payload, dict) else {},
-            })
-        except Exception:
-            pass
+
+        # Publish succeeded.
+        _append_hub_cmd_log({
+            "event": "cmd_published",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "topic": topic,
+            "command_id": cmd_id,
+            "cmd": cmd,
+        })
+
+    except Exception as e:
+        # Publish failed.
+        _append_hub_cmd_log({
+            "event": "cmd_publish_failed",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "topic": topic,
+            "command_id": cmd_id,
+            "cmd": cmd,
+            "error": str(e),
+        })
+        raise
 
 def publish_update(site_id: str, device_id: str, command_id: str) -> None:
     payload = make_command_payload(command_id=command_id, cmd="update")
@@ -1852,15 +1896,6 @@ def ui_speak():
 
         write_registry(reg)
 
-        # Log speak_published event
-        _append_hub_cmd_log({
-            "event": "speak_published",
-            "site_id": str(site_id),
-            "device_id": str(device_id),
-            "command_id": str(command_id),
-            "audio_id": str(audio_id),
-        })
-
         # Best-effort cleanup of hub audio cache after storing/serving audio
         _cleanup_audio_cache_if_needed()
 
@@ -2040,14 +2075,6 @@ def ui_speak_retry():
             pass
 
         write_registry(reg)
-
-        _append_hub_cmd_log({
-            "event": "speak_published",
-            "site_id": str(site_id),
-            "device_id": str(device_id),
-            "command_id": str(command_id),
-            "audio_id": str(audio_id),
-        })
 
     except Exception as e:
         return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
@@ -2264,9 +2291,31 @@ def ui_status():
 
         now_ts = int(time.time())
 
-        def _set_last_speak_state(new_ls: dict) -> None:
+        def _set_last_speak_state(new_ls: dict, *, reason: str | None = None) -> None:
             """Persist updated last_speak into both response and registry."""
             nonlocal changed
+
+            # Best-effort audit log of state transitions
+            try:
+                prev_ls = rec.get("last_speak") if isinstance(rec.get("last_speak"), dict) else {}
+                prev_state = str(prev_ls.get("state") or "").strip().lower()
+                next_state = str(new_ls.get("state") or "").strip().lower()
+
+                if next_state and next_state != prev_state:
+                    _append_hub_cmd_log({
+                        "event": "speak_state",
+                        "site_id": str(rec.get("site_id") or "demo"),
+                        "device_id": str(rec.get("device_id") or device_id),
+                        "command_id": str(new_ls.get("command_id") or ""),
+                        "audio_id": str(new_ls.get("audio_id") or ""),
+                        "from": prev_state,
+                        "to": next_state,
+                        "reason": reason,
+                        "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},
+                    })
+            except Exception:
+                pass
+
             rec["last_speak"] = new_ls
             drec["last_speak"] = new_ls
             reg[device_id] = rec
@@ -2296,7 +2345,7 @@ def ui_status():
                                 new_ls["ack_ts"] = ack.get("ts")
                             if ack_status == "completed":
                                 new_ls["completed_at"] = ack.get("ts") if "ts" in ack else now_ts
-                            _set_last_speak_state(new_ls)
+                            _set_last_speak_state(new_ls, reason="ack_status")
                         else:
                             # Keep response consistent
                             drec["last_speak"] = ls
@@ -2308,7 +2357,7 @@ def ui_status():
                             new_ls["error"] = ack.get("error") or ack.get("details") or ack_status
                             if "ts" in ack and new_ls.get("ack_ts") is None:
                                 new_ls["ack_ts"] = ack.get("ts")
-                            _set_last_speak_state(new_ls)
+                            _set_last_speak_state(new_ls, reason="ack_error")
 
             # No matching ACK yet: enforce timeouts based on hub timestamps.
             else:
@@ -2328,7 +2377,7 @@ def ui_status():
                             new_ls["state"] = "timeout"
                             new_ls["error"] = f"ack_timeout_after_{ack_accept_timeout}s"
                             new_ls["timeout_at"] = now_ts
-                            _set_last_speak_state(new_ls)
+                            _set_last_speak_state(new_ls, reason="ack_timeout")
 
                     # 2) Waiting for completion after accepted
                     elif ls_state == "accepted":
@@ -2339,7 +2388,7 @@ def ui_status():
                             new_ls["state"] = "timeout"
                             new_ls["error"] = f"complete_timeout_after_{ack_complete_timeout}s"
                             new_ls["timeout_at"] = now_ts
-                            _set_last_speak_state(new_ls)
+                            _set_last_speak_state(new_ls, reason="complete_timeout")
 
         devices.append(drec)
 
@@ -2349,26 +2398,7 @@ def ui_status():
             write_registry(reg)
         except Exception:
             pass
-#
-# --- Device ACK handler: log inbound ACKs after storing in registry ---
-#
 
-# Insert logging of inbound ACKs after writing rec["last_ack"] in the appropriate handler.
-# (The actual handler is not shown in the excerpt, but the following is the pattern:)
-#
-# After:
-#     rec["last_ack"] = payload
-# Insert:
-#             try:
-#                 _append_hub_cmd_log({
-#                     "event": "ack_received",
-#                     "site_id": str(rec.get("site_id") or "demo"),
-#                     "device_id": str(rec.get("device_id") or device_id),
-#                     "command_id": str((rec.get("last_ack") or {}).get("command_id") or ""),
-#                     "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},
-#                 })
-#             except Exception:
-#                 pass
 
     devices.sort(key=lambda r: str(r.get("device_id", "")))
     ota_latest = _read_ota_latest_version()
@@ -2758,3 +2788,53 @@ if __name__ == "__main__":
 
     # Never enable the reloader under systemd (it will fork/re-exec and confuse service state)
     app.run(host=host, port=port, debug=False, use_reloader=False)
+        # MQTT inbound ACK topic handler (not shown in full here)...
+        # After: rec["last_ack"] = payload
+        # Insert:
+    try:
+        _append_hub_cmd_log({
+            "event": "ack_received",
+            "site_id": str(rec.get("site_id") or "demo"),
+            "device_id": str(rec.get("device_id") or device_id),
+            "command_id": str((rec.get("last_ack") or {}).get("command_id") or ""),
+            "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},
+        })
+    except Exception:
+        pass
+#
+# MQTT inbound message handler (ACK/state)
+#
+
+def handle_inbound_mqtt_message(topic: str, payload: dict, reg: dict):
+    """Process inbound MQTT messages from devices. Called from MQTT client loop."""
+    # Example topic: site/demo/device/device123/ack
+    #                site/demo/device/device123/state
+    # payload is already decoded as dict
+    parts = topic.split("/")
+    if len(parts) < 5 or parts[0] != "site" or parts[2] != "device":
+        return
+    site_id = parts[1]
+    device_id = parts[3]
+    msg_type = parts[4]
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return
+
+    if msg_type == "ack":
+        ack = payload if isinstance(payload, dict) else {}
+        rec["last_ack"] = ack
+        try:
+            _append_hub_cmd_log({
+                "event": "ack_received",
+                "site_id": str(rec.get("site_id") or "demo"),
+                "device_id": str(rec.get("device_id") or device_id),
+                "command_id": str((rec.get("last_ack") or {}).get("command_id") or ""),
+                "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},
+            })
+        except Exception:
+            pass
+        # ... rest of ack handling ...
+    elif msg_type == "state":
+        state = payload if isinstance(payload, dict) else {}
+        rec["last_state"] = state
+        # ... rest of state handling ...
