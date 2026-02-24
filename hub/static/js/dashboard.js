@@ -5,6 +5,58 @@
   // Cached hub health snapshot from /ui/health
   let _hubHealth = null;
   let _hubHealthLoadedAt = 0;
+
+  // Populate the Hub Health panel (separate DOM block in dashboard.html)
+  function setTextIfEl(id, text){
+    const el = $(id);
+    if (!el) return;
+    el.textContent = (text == null || text === '') ? '—' : String(text);
+  }
+
+  function pillTextFromOk(ok){
+    if (ok === true) return 'OK';
+    if (ok === false) return 'ERR';
+    return '—';
+  }
+
+  function updateHubHealthPanel(health){
+    // Expected shapes:
+    //  - {hub_health:{ok:true, checks:{...}}, audio_cache:{...}, ...}
+    //  - {ok:true, checks:{...}} (legacy)
+
+    if (!health || typeof health !== 'object') {
+      setTextIfEl('hubHealthOverall', '—');
+      setTextIfEl('hubHealthMqtt', '—');
+      setTextIfEl('hubHealthAudio', '—');
+      setTextIfEl('hubHealthElevenlabs', '—');
+      setTextIfEl('hubHealthErr', '');
+      return;
+    }
+
+    const hubH = (health.hub_health && typeof health.hub_health === 'object') ? health.hub_health : health;
+    const checks = (hubH.checks && typeof hubH.checks === 'object') ? hubH.checks : (health.checks && typeof health.checks === 'object' ? health.checks : null);
+
+    const overallOk = (typeof hubH.ok === 'boolean') ? hubH.ok : (typeof health.ok === 'boolean' ? health.ok : null);
+
+    const mqttOk = checks && checks.mqtt_tcp ? checks.mqtt_tcp.ok : null;
+    const audioOk = checks && checks.audio_server ? checks.audio_server.ok : null;
+    const elOk = checks && checks.elevenlabs_api ? checks.elevenlabs_api.ok : null;
+
+    setTextIfEl('hubHealthOverall', pillTextFromOk(overallOk));
+    setTextIfEl('hubHealthMqtt', pillTextFromOk(mqttOk));
+    setTextIfEl('hubHealthAudio', pillTextFromOk(audioOk));
+    setTextIfEl('hubHealthElevenlabs', pillTextFromOk(elOk));
+
+    // Optional error detail line
+    let err = '';
+    if (checks) {
+      const e1 = checks.mqtt_tcp && checks.mqtt_tcp.error ? `MQTT: ${checks.mqtt_tcp.error}` : '';
+      const e2 = checks.audio_server && checks.audio_server.error ? `Audio: ${checks.audio_server.error}` : '';
+      const e3 = checks.elevenlabs_api && checks.elevenlabs_api.error ? `ElevenLabs: ${checks.elevenlabs_api.error}` : '';
+      err = [e1, e2, e3].filter(Boolean).join(' | ');
+    }
+    setTextIfEl('hubHealthErr', err);
+  }
   function fmtBytes(n){
   n = Number(n||0);
   if (!isFinite(n)) return '0';
@@ -350,6 +402,10 @@ async function loadAudioStatus(){
       if (health && typeof health === 'object') {
         _hubHealth = health;
         _hubHealthLoadedAt = Date.now();
+        updateHubHealthPanel(_hubHealth);
+      } else {
+        // Clear to dashes if /ui/health missing or failed
+        updateHubHealthPanel(null);
       }
 
       const devices = data.devices || [];
@@ -409,6 +465,7 @@ async function loadAudioStatus(){
     } catch (e) {
       renderBanner(null);
       render([]);
+      updateHubHealthPanel(null);
       log(`Refresh failed: ${e.message}`);
     }
   }
