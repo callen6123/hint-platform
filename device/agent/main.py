@@ -36,6 +36,16 @@ HINT_AUDIO_CARDID = os.environ.get("HINT_AUDIO_CARDID", "").strip() or None
 # Examples: "plughw:Device,0", "default", "sysdefault:CARD=Device"
 HINT_AUDIO_ALSA_DEVICE = os.environ.get("HINT_AUDIO_ALSA_DEVICE", "").strip() or None
 
+# Optional: additional fallbacks (comma-separated), tried after preferred device.
+# Example: "default,sysdefault"
+HINT_AUDIO_FALLBACK_DEVICES = [
+    s.strip() for s in os.environ.get("HINT_AUDIO_FALLBACK_DEVICES", "default").split(",") if s.strip()
+]
+
+# Playback timeout (prevents a stuck player from wedging demos)
+SPEAK_PLAY_TIMEOUT_SEC = float(os.environ.get("HINT_SPEAK_PLAY_TIMEOUT_SEC", "120"))
+SPEAK_PLAY_TIMEOUT_SEC = max(5.0, min(SPEAK_PLAY_TIMEOUT_SEC, 600.0))
+
 # State publish behavior
 HEARTBEAT_SEC = int(os.environ.get("HINT_STATE_HEARTBEAT_SEC", "30"))
 HEARTBEAT_SEC = max(5, min(HEARTBEAT_SEC, 3600))
@@ -142,9 +152,10 @@ def _player_cmd_candidates(path: Path) -> list[list[str]]:
 
     # WAV fallbacks
     if primary and primary[0] == "aplay":
-        # If primary uses -D <device>, try default device, then bare.
+        # If primary uses -D <device>, try configured fallbacks, then bare.
         if "-D" in primary:
-            candidates.append(["aplay", "-D", "default", str(path)])
+            for dev in HINT_AUDIO_FALLBACK_DEVICES:
+                candidates.append(["aplay", "-D", dev, str(path)])
         candidates.append(["aplay", str(path)])
 
         # PulseAudio fallback if present (WAV)
@@ -193,22 +204,7 @@ def play_file(path: Path) -> None:
         print(f"[AUDIO] missing file: {path}")
         return
 
-    primary = _aplay_cmd_for(path)
-
-    # Fallbacks: try default device if a specific ALSA device fails.
-    fallbacks: list[list[str]] = []
-
-    if primary and primary[0] == "aplay":
-        # If primary uses -D plughw:..., try 'default' and finally bare 'aplay'.
-        if "-D" in primary:
-            fallbacks.append(["aplay", "-D", "default", str(path)])
-        fallbacks.append(["aplay", str(path)])
-
-    if primary and primary[0] == "mpg123":
-        # If primary uses -a plughw:..., try without explicit device.
-        fallbacks.append(["mpg123", str(path)])
-
-    cmd_candidates = [primary] + fallbacks
+    cmd_candidates = _player_cmd_candidates(path)
 
     # Retry a few times to handle USB “not ready” moments
     for attempt in range(1, 6):
@@ -219,7 +215,7 @@ def play_file(path: Path) -> None:
 
         for cmd in cmd_candidates:
             last_cmd = cmd
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=SPEAK_PLAY_TIMEOUT_SEC)
             if res.returncode == 0:
                 print(f"[AUDIO] played {path} via {cmd}")
                 return
@@ -254,29 +250,35 @@ def play_file(path: Path) -> None:
                 if conv.returncode == 0 and converted.exists():
                     print(f"[AUDIO] converted to 16-bit PCM via {conv_cmd}: {converted}")
 
-                    primary2 = _aplay_cmd_for(converted)
-                    fallbacks2: list[list[str]] = []
-                    if primary2 and primary2[0] == "aplay":
-                        if "-D" in primary2:
-                            fallbacks2.append(["aplay", "-D", "default", str(converted)])
-                        fallbacks2.append(["aplay", str(converted)])
-                    if primary2 and primary2[0] == "mpg123":
-                        fallbacks2.append(["mpg123", str(converted)])
+                    # Rebuild candidate chain using the unified logic (includes fallbacks + paplay)
+                    cmd_candidates2 = _player_cmd_candidates(converted)
 
-                    for cmd2 in [primary2] + fallbacks2:
-                        res2 = subprocess.run(cmd2, capture_output=True, text=True)
+                    last_rc2 = 0
+                    last_cmd2: list[str] = []
+                    last_out2 = ""
+                    last_err2 = ""
+
+                    for cmd2 in cmd_candidates2:
+                        last_cmd2 = cmd2
+                        res2 = subprocess.run(
+                            cmd2,
+                            capture_output=True,
+                            text=True,
+                            timeout=SPEAK_PLAY_TIMEOUT_SEC,
+                        )
                         if res2.returncode == 0:
                             print(f"[AUDIO] played converted {converted} via {cmd2}")
                             return
 
-                    # If we got here, all converted attempts failed; log last result
-                    err2 = (res2.stderr or "").strip() if 'res2' in locals() else ""
-                    out2 = (res2.stdout or "").strip() if 'res2' in locals() else ""
-                    print(f"[AUDIO] converted play failed rc={res2.returncode if 'res2' in locals() else 'n/a'} cmd={cmd2 if 'cmd2' in locals() else 'n/a'}")
-                    if out2:
-                        print(f"[AUDIO] stdout: {out2}")
-                    if err2:
-                        print(f"[AUDIO] stderr: {err2}")
+                        last_rc2 = res2.returncode
+                        last_out2 = (res2.stdout or "").strip()
+                        last_err2 = (res2.stderr or "").strip()
+
+                    print(f"[AUDIO] converted play failed rc={last_rc2} cmd={last_cmd2}")
+                    if last_out2:
+                        print(f"[AUDIO] stdout: {last_out2}")
+                    if last_err2:
+                        print(f"[AUDIO] stderr: {last_err2}")
             except Exception as e:
                 print(f"[AUDIO] conversion fallback failed: {e}")
 
@@ -671,9 +673,13 @@ def main() -> None:
             start_new_session=True,
         )
 
-    def _wait_player(p: subprocess.Popen) -> tuple[int, str, str]:
+    def _wait_player(p: subprocess.Popen, *, timeout_sec: float | None = None) -> tuple[int, str, str]:
         """Wait for player and return (rc, stdout, stderr)."""
-        rc = p.wait()
+        try:
+            rc = p.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            _kill_proc(p)
+            rc = 124
         out = (p.stdout.read() if p.stdout else "").strip()
         err = (p.stderr.read() if p.stderr else "").strip()
         return rc, out, err
@@ -740,7 +746,7 @@ def main() -> None:
                             playback_state = "stopping"
                         _kill_proc(p)
 
-                    rc, out, err = _wait_player(p)
+                    rc, out, err = _wait_player(p, timeout_sec=SPEAK_PLAY_TIMEOUT_SEC)
 
                     # If cancelled, stop trying fallbacks.
                     if cancel_event.is_set() or playback_state == "stopping":
@@ -990,7 +996,7 @@ def main() -> None:
                     "url": url,
                     "audio_id": audio_id,
                 })
-            elif cmd == "beep":
+            elif cmd in {"beep", "speaker_test"}:
                 enqueue_job({"type": "beep", "command_id": str(cid)})
 
             else:
