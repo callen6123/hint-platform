@@ -532,7 +532,7 @@ async function loadAudioStatus(){
   function render(devices, otaLatest){
     const tbody = $("tbody");
     if (!devices.length){
-      tbody.innerHTML = `<tr><td colspan=\"8\" class=\"muted\">No devices.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan=\"9\" class=\"muted\">No devices.</td></tr>`;
       return;
     }
 
@@ -558,10 +558,10 @@ async function loadAudioStatus(){
             <span class="pill">${did}</span>
             ${renderWarnings(d) ? `<div style="margin-top:6px;">${renderWarnings(d)}</div>` : ``}
             ${!isOnline(d) ? `<div class="muted" style="margin-top:6px;"><b>${offlineDetail(d)}</b></div>` : ``}
-            ${renderSpeakBlock(d)}
           </td>
           <td class="${statusClass(st)}">${st}</td>
           <td class="muted">${ls}${ageStr ? ` <span class="muted">(${ageStr})</span>` : ''}${!isOnline(d) && d.offline_reason ? ` <span class="muted">[${offlineReasonLabel(d.offline_reason)}]</span>` : ''}</td>
+          <td class="muted">${renderSpeakBlock(d) || ''}</td>
           <td>${av}${needsUpdate ? `<div class="muted">Update available</div>` : ``}</td>
           <td>${sv}</td>
           <td class="muted">${lc}</td>
@@ -812,7 +812,7 @@ async function loadAudioStatus(){
       const did = actionDeviceSelect ? actionDeviceSelect.value : '';
       speakerTestBtn.disabled = true;
       log(`Speaker test: ${did}...`);
-      const r = await runDeviceAction('/ui/device/speaker-test', did);
+      const r = await runDeviceAction('/ui/device/speaker_test', did);
       log(`Speaker test result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
