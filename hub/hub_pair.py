@@ -1457,6 +1457,7 @@ def ui_phrases_delete():
 
 # --- UI cancel endpoint ---
 
+
 @app.post("/ui/cancel")
 def ui_cancel():
     """Send a cancel command to a device.
@@ -1524,6 +1525,61 @@ def ui_cancel():
         "device_id": device_id,
         "command_id": command_id,
         "mode": mode,
+    })
+
+
+# --- UI speak stop endpoint ---
+@app.post("/ui/speak/stop")
+def ui_speak_stop():
+    """Convenience endpoint: stop current playback on a device.
+
+    Body:
+      {"device_id": "...", "command_id": "optional", "ttl_sec": 300, "priority": 10}
+
+    This simply publishes a `cancel` command with mode="stop".
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"cancel-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="cancel",
+        params={"mode": "stop"},
+        ttl_sec=ttl_sec if ttl_sec is not None else 300,
+        priority=priority if priority is not None else 10,
+    )
+
+    try:
+        publish_command(site_id, device_id, payload)
+        _mark_sent_in_registry(reg, device_id, command_id, "cancel")
+        write_registry(reg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "device_id": device_id,
+        "command_id": command_id,
+        "mode": "stop",
     })
 
 # --- UI TTS speak endpoint ---
@@ -2050,16 +2106,57 @@ def ui_status():
             drec["warning"] = None
 
         # --- Stalled speak detection (dashboard actions) ---
+        # A speak is considered "stalled" when it's in a mid-flight state (sent/accepted)
+        # longer than a configured threshold.
         stalled = False
         stalled_reason = None
+        stalled_age_sec = None
+
+        # Thresholds (seconds) for early warning flags.
+        # These are separate from the hard timeout transitions below.
+        try:
+            stall_sent_after = int(os.environ.get("HINT_SPEAK_STALL_SENT_AFTER_SEC", "25"))
+        except Exception:
+            stall_sent_after = 25
+        try:
+            stall_accepted_after = int(os.environ.get("HINT_SPEAK_STALL_ACCEPTED_AFTER_SEC", "60"))
+        except Exception:
+            stall_accepted_after = 60
+        stall_sent_after = max(5, min(stall_sent_after, 3600))
+        stall_accepted_after = max(10, min(stall_accepted_after, 24 * 3600))
+
         ls2 = drec.get("last_speak") if isinstance(drec.get("last_speak"), dict) else None
         if isinstance(ls2, dict):
-            st = str(ls2.get("state") or "").lower()
+            st = str(ls2.get("state") or "").strip().lower()
+
+            # If we already marked it timeout/error, it is definitely stalled.
             if st in ("timeout", "error"):
                 stalled = True
-                stalled_reason = ls2.get("error") or st
-        drec["speak_stalled"] = stalled
+                stalled_reason = str(ls2.get("error") or st)
+
+            # Otherwise, compute how long it's been in-flight.
+            else:
+                base_ts = None
+                if st == "accepted" and isinstance(ls2.get("ack_ts"), (int, float)):
+                    base_ts = int(ls2.get("ack_ts"))
+                elif isinstance(ls2.get("sent_at"), (int, float)):
+                    base_ts = int(ls2.get("sent_at"))
+                elif isinstance(ls2.get("issued_at"), (int, float)):
+                    base_ts = int(ls2.get("issued_at"))
+
+                if base_ts is not None:
+                    stalled_age_sec = max(0, int(time.time()) - base_ts)
+
+                    if st == "sent" and stalled_age_sec >= stall_sent_after:
+                        stalled = True
+                        stalled_reason = f"sent_no_ack_{stalled_age_sec}s"
+                    elif st == "accepted" and stalled_age_sec >= stall_accepted_after:
+                        stalled = True
+                        stalled_reason = f"accepted_no_complete_{stalled_age_sec}s"
+
+        drec["speak_stalled"] = bool(stalled)
         drec["speak_stalled_reason"] = stalled_reason
+        drec["speak_stalled_age_sec"] = stalled_age_sec
 
         # --- Reconcile last_speak state with last_ack (end-to-end progress) ---
         # We want the UI to show an end-to-end pipeline:

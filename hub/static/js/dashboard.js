@@ -175,6 +175,47 @@ async function loadAudioStatus(){
     return parts.join('');
   }
 
+  function speakStateLabel(s){
+    s = String(s || '').toLowerCase();
+    if (!s) return '—';
+    if (s === 'generated') return 'Generated';
+    if (s === 'sent') return 'Sent';
+    if (s === 'accepted') return 'Accepted';
+    if (s === 'completed') return 'Completed';
+    if (s === 'error') return 'Error';
+    return s;
+  }
+
+  function renderSpeakBlock(d){
+    const ls = d && d.last_speak;
+    if (!ls || !ls.command_id) return '';
+
+    const state = speakStateLabel(ls.state || 'sent');
+    const cmdId = String(ls.command_id);
+
+    let html = `<div class="muted" style="margin-top:6px;">Speak: ${esc(state)}<span class="muted"> (${esc(cmdId)})</span></div>`;
+
+    // Stalled speak detection surfaced from /ui/status
+    if (d && d.speak_stalled) {
+      const reason = String(d.speak_stalled_reason || 'stalled');
+      const ageSec = (typeof d.speak_stalled_age_sec === 'number') ? d.speak_stalled_age_sec : null;
+      const ageStr = (ageSec != null) ? fmtAgeSeconds(ageSec) : '';
+      const ageTxt = ageStr ? ` (${esc(ageStr)})` : '';
+
+      html += `
+        <div class="warn" style="margin-top:6px;">
+          ⚠ Speak stalled: ${esc(reason)}${ageTxt}
+          <div class="row-actions" style="margin-top:6px;">
+            <button data-action="speakStop" data-device="${esc(d.device_id)}" data-cmd="${esc(cmdId)}">Stop</button>
+            <button data-action="speakRetry" data-device="${esc(d.device_id)}" data-cmd="${esc(cmdId)}">Retry</button>
+          </div>
+        </div>
+      `;
+    }
+
+    return html;
+  }
+
   function lastCmd(d){
     const cid = fmt(d.last_command_id || '');
     const st = fmt(d.last_command_status || '');
@@ -401,7 +442,7 @@ async function loadAudioStatus(){
             <span class="pill">${did}</span>
             ${renderWarnings(d) ? `<div style="margin-top:6px;">${renderWarnings(d)}</div>` : ``}
             ${!isOnline(d) ? `<div class="muted" style="margin-top:6px;"><b>${offlineDetail(d)}</b></div>` : ``}
-            ${d.last_speak && d.last_speak.command_id ? `<div class="muted" style="margin-top:6px;">Speak: ${String(d.last_speak.state || 'sent')}<span class="muted"> (${String(d.last_speak.command_id)})</span></div>` : ``}
+            ${renderSpeakBlock(d)}
           </td>
           <td class="${statusClass(st)}">${st}</td>
           <td class="muted">${ls}${ageStr ? ` <span class="muted">(${ageStr})</span>` : ''}${!isOnline(d) && d.offline_reason ? ` <span class="muted">[${offlineReasonLabel(d.offline_reason)}]</span>` : ''}</td>
@@ -423,12 +464,21 @@ async function loadAudioStatus(){
       btn.addEventListener('click', async () => {
         const action = btn.getAttribute('data-action');
         const device = btn.getAttribute('data-device');
+        const targetCmd = btn.getAttribute('data-cmd');
         try {
           btn.disabled = true;
           if (action === 'update') {
             log(`Updating ${device}...`);
             const r = await api('/ui/update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
             log(`Update result: ${JSON.stringify(r)}`);
+          } else if (action === 'speakStop') {
+            log(`Speak stop requested for ${device} (target=${targetCmd || 'unknown'})...`);
+            const r = await api('/ui/speak/stop', 'POST', { device_id: device, target_command_id: targetCmd || null });
+            log(`Speak stop result: ${JSON.stringify(r)}`);
+          } else if (action === 'speakRetry') {
+            log(`Speak retry requested for ${device} (target=${targetCmd || 'unknown'})...`);
+            const r = await api('/ui/speak/retry', 'POST', { device_id: device, target_command_id: targetCmd || null });
+            log(`Speak retry result: ${JSON.stringify(r)}`);
           } else {
             log(`Build+Update ${device}...`);
             const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
