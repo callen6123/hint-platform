@@ -1670,7 +1670,7 @@ def ui_speak_stop():
 
 # --- UI device speaker test (beep) ---
 
-@app.post("/ui/beep")
+@app.post("/ui/device/beep")
 def ui_beep():
     """Send a short speaker test command to a device.
 
@@ -1745,7 +1745,7 @@ def ui_beep():
 
 
 # Back-compat alias for UI callers
-@app.post("/ui/speaker_test")
+@app.post("/ui/speaker-test")
 def ui_speaker_test():
     return ui_beep()
 
