@@ -12,7 +12,10 @@ from flask import Flask, request
 PROVISION_PATH = "/etc/hint/hub_provision.json"
 
 # If your hub service has a different name, change it here.
-HUB_SERVICE_NAME = "hint-hub.service"
+HUB_SERVICE_NAMES = [
+    "hint-hub-pair.service",
+    "hint-device-watch.service",
+]
 
 # Hotspot settings used only when Ethernet is not up
 HOTSPOT_CONN_NAME = "hinthub-setup"
@@ -216,12 +219,21 @@ def set_hostname_if_needed() -> None:
 
 
 def enable_hub_service() -> None:
-    try:
-        sh(["sudo", "systemctl", "daemon-reload"])
-        sh(["sudo", "systemctl", "enable", HUB_SERVICE_NAME])
-        sh(["sudo", "systemctl", "start", HUB_SERVICE_NAME])
-    except Exception as e:
-        raise RuntimeError(f"Failed to enable/start hub service '{HUB_SERVICE_NAME}': {e}")
+    ok = False
+    errs: list[str] = []
+
+    sh(["sudo", "systemctl", "daemon-reload"])
+
+    for svc in HUB_SERVICE_NAMES:
+        try:
+            sh(["sudo", "systemctl", "enable", svc])
+            sh(["sudo", "systemctl", "start", svc])
+            ok = True
+        except Exception as e:
+            errs.append(f"{svc}: {e}")
+
+    if not ok:
+        raise RuntimeError("Failed to enable/start any hub services: " + "; ".join(errs))
 
 
 def render_index_html(wired: bool) -> str:
