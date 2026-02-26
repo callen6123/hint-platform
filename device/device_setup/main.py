@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -13,28 +14,54 @@ HUB_PAIR_URL = "http://hinthub.local:5000/pair/complete"
 
 app = Flask(__name__)
 
-HTML = """
+HTML_TEMPLATE = """
 <!doctype html>
 <html>
   <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
     <title>Hint Device Setup</title>
   </head>
-  <body style="font-family: sans-serif; max-width: 520px; margin: 40px auto;">
+  <body style=\"font-family: sans-serif; max-width: 520px; margin: 40px auto;\">
     <h2>Hint Device Setup</h2>
-    <p>Connect your phone/laptop to Wi-Fi <b>HintDevice-SETUP</b> (password <b>hintsetup123</b>). Your phone may open the setup page automatically; if not, open your browser and visit the gateway IP (often <b>10.42.0.1</b>).</p>
-    <form method="post" action="/submit">
-      <label>Venue Wi-Fi SSID</label><br>
-      <input name="ssid" style="width:100%;padding:10px" required><br><br>
-      <label>Venue Wi-Fi Password</label><br>
-      <input name="psk" type="password" style="width:100%;padding:10px" required><br><br>
+
+    <p>{connection_note}</p>
+
+    <form method=\"post\" action=\"/submit\">
+      {wifi_fields}
+
       <label>Pairing Code</label><br>
-      <input name="pair_code" style="width:100%;padding:10px" required><br><br>
-      <button type="submit" style="padding:12px 18px">Connect & Pair</button>
+      <input name=\"pair_code\" style=\"width:100%;padding:10px\" required><br><br>
+
+      <button type=\"submit\" style=\"padding:12px 18px\">Connect & Pair</button>
     </form>
   </body>
 </html>
 """
+
+WIFI_FIELDS_HTML = """
+<label>Venue Wi-Fi SSID</label><br>
+<input name=\"ssid\" style=\"width:100%;padding:10px\" required><br><br>
+<label>Venue Wi-Fi Password</label><br>
+<input name=\"psk\" type=\"password\" style=\"width:100%;padding:10px\" required><br><br>
+"""
+
+
+def render_index_html(wired: bool) -> str:
+    if wired:
+        note = (
+            "Ethernet detected (DHCP active). You can pair this device without entering Wi-Fi. "
+            "If you want the device to use Wi-Fi instead, unplug Ethernet and refresh."
+        )
+        wifi_fields = ""
+    else:
+        note = (
+            "Connect your phone/laptop to Wi-Fi <b>HintDevice-SETUP</b> (password <b>hintsetup123</b>). "
+            "Your phone may open the setup page automatically; if not, open your browser and visit the gateway IP "
+            "(often <b>10.42.0.1</b>)."
+        )
+        wifi_fields = WIFI_FIELDS_HTML
+
+    return HTML_TEMPLATE.format(connection_note=note, wifi_fields=wifi_fields)
 
 def sh(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
@@ -56,6 +83,18 @@ def nmcli(*args: str) -> str:
     # Returns stdout as text.
     out = subprocess.check_output(["nmcli", "-t", *args], text=True)
     return out.strip()
+
+
+def has_ipv4(ifname: str) -> bool:
+    """Return True if the interface has a non-empty IPv4 address."""
+    try:
+        ip4 = nmcli("-f", "IP4.ADDRESS", "device", "show", ifname)
+        # Looks like: "IP4.ADDRESS[1]:192.168.1.10/24" or empty.
+        if ":" in ip4 and ip4.split(":", 1)[1].strip():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def ensure_networkmanager() -> None:
@@ -203,7 +242,8 @@ def read_device_id() -> str:
 
 @app.get("/")
 def index():
-    return HTML
+    wired = has_ipv4("eth0")
+    return render_index_html(wired)
 
 @app.post("/submit")
 def submit():
@@ -211,15 +251,22 @@ def submit():
     psk = request.form.get("psk", "").strip()
     pair_code = request.form.get("pair_code", "").strip()
 
-    if not ssid or not psk or not pair_code:
-        return "Missing fields", 400
+    wired = has_ipv4("eth0")
+
+    if not pair_code:
+        return "Missing pairing code", 400
+
+    if not wired and (not ssid or not psk):
+        return "Missing Wi-Fi fields", 400
 
     device_id = read_device_id()
 
-    try:
-        join_venue_wifi(ssid, psk)
-    except Exception as e:
-        return f"Failed to join venue Wi-Fi: {e}", 500
+    # Only switch Wi-Fi if we're not already on Ethernet.
+    if not wired:
+        try:
+            join_venue_wifi(ssid, psk)
+        except Exception as e:
+            return f"Failed to join venue Wi-Fi: {e}", 500
 
     # Pair with hub
     try:
@@ -247,8 +294,24 @@ def submit():
     return "Paired. Rebooting..."
 
 def main():
-    # Ensure AP is up before serving the page
-    ensure_hotspot_up()
+    # If already provisioned, don't enter setup mode again.
+    if os.path.exists(PROVISION_PATH):
+        enable_agent_service()
+        sh(["sudo", "reboot"])
+        return
+
+    wired = has_ipv4("eth0")
+
+    # If Ethernet is up, do NOT start the provisioning hotspot.
+    if not wired:
+        ensure_hotspot_up()
+    else:
+        # Ensure hotspot isn't active (best effort).
+        try:
+            sh(["sudo", "nmcli", "con", "down", HOTSPOT_CONN_NAME])
+        except Exception:
+            pass
+
     # Run Flask (this must NOT exit)
     app.run(host="0.0.0.0", port=80)
 
