@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, abort, render_template, Response
+from flask import Flask, request, jsonify, send_file, abort, render_template, Response, session, redirect, url_for, make_response
 from jinja2 import ChoiceLoader, FileSystemLoader
 import os
 import sys
@@ -60,6 +60,7 @@ HUB_STATIC_DIR = str(REPO_ROOT / "hub" / "static")
 # Prefer repo-root static if present, otherwise hub/static.
 _static_dir = STATIC_DIR if Path(STATIC_DIR).is_dir() else HUB_STATIC_DIR
 
+
 app = Flask(
     __name__,
     static_folder=_static_dir,
@@ -68,6 +69,28 @@ app = Flask(
 
 # Allow Jinja to search multiple template directories.
 app.jinja_loader = ChoiceLoader([FileSystemLoader(p) for p in TEMPLATES_DIRS])
+
+# --- UI session/cookie auth (product-grade UX) ---
+# Cookie session login for browser UX; Basic Auth remains as fallback for curl/debugging.
+# IMPORTANT: set HINT_UI_SECRET (or FLASK_SECRET_KEY) in production to a stable random value.
+# If behind HTTPS (nginx), set HINT_UI_COOKIE_SECURE=1.
+
+_UI_SECRET = (os.environ.get("HINT_UI_SECRET") or os.environ.get("FLASK_SECRET_KEY") or "").strip()
+if not _UI_SECRET:
+    # Fallback so the hub still starts; for real deployments provide a stable secret via env.
+    _UI_SECRET = secrets.token_urlsafe(32)
+
+app.secret_key = _UI_SECRET
+
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = bool(int(os.environ.get("HINT_UI_COOKIE_SECURE", "0") or "0"))
+
+try:
+    # 12 hours default
+    app.permanent_session_lifetime = int(os.environ.get("HINT_UI_SESSION_LIFETIME_SEC", "43200"))
+except Exception:
+    pass
 
 # Register audio blueprint if available
 if audio_bp is not None:
@@ -86,6 +109,31 @@ UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
 HUB_LOG_DIR = Path("/var/lib/hint/logs")
 HUB_CMD_LOG_PATH = HUB_LOG_DIR / "hub_cmd.log"
 _HUB_CMD_LOG_LOCK = threading.Lock()
+
+
+# --- Log tail helper for UI ---
+def _tail_text_file(path: Path, max_lines: int = 500) -> str:
+    """Return the last `max_lines` lines of a UTF-8 text file (best-effort)."""
+    try:
+        max_lines = int(max_lines)
+    except Exception:
+        max_lines = 500
+    max_lines = max(10, min(max_lines, 5000))
+
+    try:
+        if not path.exists():
+            return ""
+
+        # Read the whole file for simplicity; log files are expected to be small.
+        # If this grows, we can implement a true tail.
+        txt = path.read_text(encoding="utf-8", errors="replace")
+        if not txt:
+            return ""
+        lines = txt.splitlines()
+        tail = lines[-max_lines:]
+        return "\n".join(tail) + ("\n" if tail else "")
+    except Exception:
+        return ""
 
 def _append_hub_cmd_log(event: dict) -> None:
     """Append a single JSON line to /var/lib/hint/logs/hub_cmd.log (best-effort)."""
@@ -830,20 +878,143 @@ def require_dashboard_key() -> None:
         abort(403)
 
 
-# UI auth (no secrets in browser). Protect /dashboard and /ui/* with HTTP Basic Auth.
 
-def require_ui_auth() -> None:
-    user = os.environ.get("HINT_UI_USER")
-    pw = os.environ.get("HINT_UI_PASS")
+# UI auth.
+# Primary UX: cookie-based session set by /login.
+# Fallback: HTTP Basic Auth (still useful for curl/debugging).
+
+def _ui_basic_auth_ok() -> bool:
+    user = (os.environ.get("HINT_UI_USER") or "").strip()
+    pw = (os.environ.get("HINT_UI_PASS") or "").strip()
+    if not user or not pw:
+        return False
+
+    auth = request.authorization
+    return bool(auth and auth.username == user and auth.password == pw)
+
+
+def _ui_session_ok() -> bool:
+    try:
+        return bool(session.get("ui_auth") is True)
+    except Exception:
+        return False
+
+
+def _ui_wants_html() -> bool:
+    accept = (request.headers.get("Accept") or "").lower()
+    return "text/html" in accept
+
+
+def require_ui_auth():
+    """Enforce UI auth for /dashboard, /speak, and /ui/*.
+
+    Returns:
+      - None if authorized
+      - A Flask Response (redirect to /login for HTML pages, or 401 JSON)
+    """
+    if _ui_session_ok():
+        return None
+
+    if _ui_basic_auth_ok():
+        return None
+
+    path = request.path or ""
+
+    # UI pages: redirect to login.
+    if path in ("/dashboard", "/speak") or _ui_wants_html():
+        nxt = request.full_path if request.query_string else path
+        try:
+            return redirect(url_for("ui_login", next=nxt))
+        except Exception:
+            return redirect("/login")
+
+    # API endpoints: 401 JSON (still advertises Basic fallback)
+    resp = jsonify({"ok": False, "error": "auth_required"})
+    resp.status_code = 401
+    resp.headers["WWW-Authenticate"] = 'Basic realm="Hint Hub"'
+    return resp
+
+
+# --- Login/logout routes (session cookie) ---
+
+@app.get("/login")
+def ui_login():
+    # If already authed, go to dashboard (or next)
+    if _ui_session_ok() or _ui_basic_auth_ok():
+        nxt = request.args.get("next") or "/dashboard"
+        return redirect(nxt)
+
+    nxt = request.args.get("next") or "/dashboard"
+    msg = request.args.get("msg") or ""
+
+    html = f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Hint Hub Login</title>
+  <link rel=\"stylesheet\" href=\"/static/css/hub.css\" />
+</head>
+<body>
+  <div class=\"page\" style=\"max-width: 520px; margin: 40px auto; padding: 16px;\">
+    <h1 style=\"margin: 0 0 12px 0;\">Hint Hub</h1>
+    <p style=\"margin: 0 0 18px 0; opacity: 0.85;\">Sign in to access the dashboard.</p>
+    {{f\"<div class='notice' style='margin-bottom:12px;color:#b00020;'>{msg}</div>\" if msg else \"\"}}
+    <form method=\"post\" action=\"/login\">
+      <input type=\"hidden\" name=\"next\" value=\"{nxt}\" />
+      <div style=\"display:flex; flex-direction:column; gap:10px;\">
+        <label>Username<br><input name=\"username\" autocomplete=\"username\" style=\"width:100%; padding:10px;\" /></label>
+        <label>Password<br><input name=\"password\" type=\"password\" autocomplete=\"current-password\" style=\"width:100%; padding:10px;\" /></label>
+        <button type=\"submit\" style=\"padding: 10px;\">Sign in</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>"""
+
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
+
+
+@app.post("/login")
+def ui_login_post():
+    user = (os.environ.get("HINT_UI_USER") or "").strip()
+    pw = (os.environ.get("HINT_UI_PASS") or "").strip()
     if not user or not pw:
         abort(403)
 
-    auth = request.authorization
-    if not auth or auth.username != user or auth.password != pw:
-        resp = jsonify({"ok": False, "error": "auth_required"})
-        resp.status_code = 401
-        resp.headers["WWW-Authenticate"] = 'Basic realm="Hint Hub"'
-        return resp
+    # Support form POST primarily, JSON as fallback
+    form_user = request.form.get("username") if request.form else None
+    form_pw = request.form.get("password") if request.form else None
+
+    if form_user is None and form_pw is None:
+        body = request.get_json(silent=True) or {}
+        form_user = body.get("username")
+        form_pw = body.get("password")
+
+    u = str(form_user or "").strip()
+    p = str(form_pw or "").strip()
+    nxt = (request.form.get("next") if request.form else None) or (request.args.get("next") or "/dashboard")
+
+    if u == user and p == pw:
+        session["ui_auth"] = True
+        session.permanent = True
+        return redirect(nxt)
+
+    try:
+        return redirect(url_for("ui_login", next=nxt, msg="Invalid credentials"))
+    except Exception:
+        return redirect("/login?msg=Invalid%20credentials")
+
+
+@app.post("/logout")
+def ui_logout():
+    try:
+        session.clear()
+    except Exception:
+        pass
+    return redirect("/login")
 
 
 def mqtt_admin_cfg() -> tuple[str, int, str, str]:
@@ -2007,6 +2178,7 @@ def health():
 
 
 # Authenticated hub health endpoint for the dashboard
+# --- Authenticated hub health endpoint for the dashboard ---
 @app.get("/ui/health")
 def ui_health():
     """Authenticated hub health endpoint for the dashboard."""
@@ -2031,6 +2203,99 @@ def ui_health():
         "hub_checked_at": hub_status.get("hub_checked_at"),
         "hub_update_error": hub_status.get("hub_update_error"),
     })
+
+
+# --- UI: Hub command log tail endpoint ---
+@app.get("/ui/logs/hub_cmd")
+def ui_hub_cmd_log_tail():
+    """Return the last N lines of the hub command audit log.
+
+    Query:
+      - lines: int (default 500, max 5000)
+
+    This is meant for quick demo debugging without SSH.
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    try:
+        lines = int(request.args.get("lines") or "500")
+    except Exception:
+        lines = 500
+
+    text = _tail_text_file(HUB_CMD_LOG_PATH, max_lines=lines)
+    if not text:
+        text = ""  # empty is fine
+
+    resp = Response(text, mimetype="text/plain; charset=utf-8")
+    # Helpful default filename when opened in a browser
+    resp.headers["Content-Disposition"] = "inline; filename=hub_cmd.log"
+    return resp
+
+
+# --- UI: Demo runbook page ---
+@app.get("/ui/runbook")
+def ui_runbook_page():
+    """Small ops runbook for demos (same-origin, authenticated)."""
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    html = """<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Hint Hub Runbook</title>
+  <link rel=\"stylesheet\" href=\"/static/css/hub.css\" />
+</head>
+<body>
+  <div class=\"page\" style=\"max-width: 900px; margin: 24px auto; padding: 16px;\">
+    <div style=\"display:flex; align-items:center; justify-content:space-between; gap:12px;\">
+      <h1 style=\"margin:0;\">Demo Runbook</h1>
+      <div style=\"display:flex; gap:10px;\">
+        <a class=\"btn\" href=\"/dashboard\">Dashboard</a>
+        <a class=\"btn\" href=\"/speak\">Speak</a>
+      </div>
+    </div>
+
+    <h2>Fast checks</h2>
+    <ul>
+      <li><b>No sound?</b> Use <b>Beep</b> and <b>Speaker Test</b> buttons on the Dashboard for that device.</li>
+      <li><b>Speak stuck on “Accepted”</b> (often after device agent restart): click <b>Cancel/Stop</b> once.</li>
+      <li><b>Device offline</b>: confirm power/network, then restart the agent: <code>sudo systemctl restart hint-device-agent</code> (or your service name).</li>
+      <li><b>Hub looks unhealthy</b>: check the health panel on Dashboard; then view recent log tail below.</li>
+    </ul>
+
+    <h2>Where to look</h2>
+    <ul>
+      <li><b>Hub audit log</b>: <a href=\"/ui/logs/hub_cmd?lines=800\">/ui/logs/hub_cmd</a></li>
+      <li><b>Hub service logs</b>: <code>sudo journalctl -u hint-hub-pair -n 200 --no-pager</code></li>
+      <li><b>Device agent logs</b>: <code>sudo journalctl -u hint-device-agent -n 200 --no-pager</code></li>
+    </ul>
+
+    <h2>What “stalled speak” means</h2>
+    <ul>
+      <li><b>Sent</b> but no ACK: device didn’t receive / process the command (MQTT / agent down).</li>
+      <li><b>Accepted</b> but no Completed: agent restarted mid-playback, audio backend stuck, or output device issue.</li>
+    </ul>
+
+    <h2>Recent hub_cmd.log (tail)</h2>
+    <pre style=\"white-space:pre-wrap; background: rgba(0,0,0,0.04); padding: 12px; border-radius: 8px;\" id=\"log\">Loading…</pre>
+    <script>
+      fetch('/ui/logs/hub_cmd?lines=200')
+        .then(r => r.text())
+        .then(t => { document.getElementById('log').textContent = t || '(empty)'; })
+        .catch(e => { document.getElementById('log').textContent = 'Failed to load log: ' + e; });
+    </script>
+  </div>
+</body>
+</html>"""
+
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
 # --- UI cancel endpoint ---
 
 @app.post("/ui/speak/retry")
@@ -2365,9 +2630,11 @@ def ui_status():
         except Exception:
             ack_accept_timeout = 20
         try:
-            ack_complete_timeout = int(os.environ.get("HINT_SPEAK_ACK_COMPLETE_TIMEOUT_SEC", "180"))
+            # Default shorter so the Speak UI doesn't stay stuck on "accepted" if the device restarts mid-playback.
+            # Can be overridden in hub env.
+            ack_complete_timeout = int(os.environ.get("HINT_SPEAK_ACK_COMPLETE_TIMEOUT_SEC", "60"))
         except Exception:
-            ack_complete_timeout = 180
+            ack_complete_timeout = 60
         ack_accept_timeout = max(5, min(ack_accept_timeout, 3600))
         ack_complete_timeout = max(10, min(ack_complete_timeout, 24 * 3600))
 
