@@ -20,6 +20,8 @@
       <button id="updateAll">Update All</button>
       <button id="audioCleanup">Clean Audio Cache</button>
       <button id="buildUpdateAll">Build+Update All</button>
+      <button id="hubCmdLogBtn" title="View hub command/audit log">Hub Cmd Log</button>
+      <button id="runbookBtn" title="Open runbook">Runbook</button>
       <span class="muted" style="margin-left:10px;">Audio:</span>
       <button id="beepBtn" title="Send a short beep to a device">Beep</button>
       <button id="speakerTestBtn" title="Run the device speaker test (beep)">Speaker Test</button>
@@ -27,6 +29,16 @@
   </header>
   <main>
     <div id="banner" class="panel" style="display:none;"></div>
+
+    <div class="panel" id="hubCmdLogPanel" style="display:none;">
+      <h3>Hub Command Log</h3>
+      <div class="controls">
+        <button id="hubCmdLogRefreshBtn">Refresh</button>
+        <button id="hubCmdLogCloseBtn">Close</button>
+        <span class="muted">Showing last 300 lines from /var/lib/hint/logs/hub_cmd.log</span>
+      </div>
+      <pre id="hubCmdLogPre" class="prelog"></pre>
+    </div>
 
     <div class="panel" id="hubHealthPanel">
       <h3>Hub Health</h3>

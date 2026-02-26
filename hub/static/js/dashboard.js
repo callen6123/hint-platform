@@ -10,6 +10,14 @@
   const beepBtn = $("beepBtn");
   const speakerTestBtn = $("speakerTestBtn");
 
+  // Optional: Hub log + runbook controls (only present if dashboard.html includes them)
+  const hubCmdLogBtn = $("hubCmdLogBtn");
+  const runbookBtn = $("runbookBtn");
+  const hubCmdLogPanel = $("hubCmdLogPanel");
+  const hubCmdLogPre = $("hubCmdLogPre");
+  const hubCmdLogRefreshBtn = $("hubCmdLogRefreshBtn");
+  const hubCmdLogCloseBtn = $("hubCmdLogCloseBtn");
+
   function populateActionDeviceSelect(devices){
     if (!actionDeviceSelect) return;
 
@@ -181,6 +189,32 @@ async function loadAudioStatus(){
       throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
     }
     return data;
+  }
+
+  async function fetchText(path){
+    const res = await fetch(path, { method: 'GET' });
+    const txt = await res.text();
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+    }
+    return txt;
+  }
+
+  function showHubCmdLogPanel(show){
+    if (!hubCmdLogPanel) return;
+    hubCmdLogPanel.style.display = show ? '' : 'none';
+  }
+
+  async function loadHubCmdLog(lines){
+    const n = Number(lines || 200);
+    const q = isFinite(n) && n > 0 ? n : 200;
+    const txt = await fetchText(`/ui/logs/hub_cmd?lines=${encodeURIComponent(String(q))}`);
+    if (hubCmdLogPre) {
+      hubCmdLogPre.textContent = txt;
+    } else {
+      // Fallback: dump into the main log area
+      log(`hub_cmd.log (last ${q} lines):\n${txt}`);
+    }
   }
 
   function statusClass(s){
@@ -797,7 +831,7 @@ async function loadAudioStatus(){
       const did = actionDeviceSelect ? actionDeviceSelect.value : '';
       beepBtn.disabled = true;
       log(`Beep: ${did}...`);
-      const r = await runDeviceAction('/ui/device/beep', did);
+      const r = await runDeviceAction('/ui/beep', did);
       log(`Beep result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
@@ -820,6 +854,44 @@ async function loadAudioStatus(){
     } finally {
       speakerTestBtn.disabled = false;
     }
+  });
+
+  // Hub log + runbook wiring (optional)
+  if (runbookBtn) runbookBtn.addEventListener('click', () => {
+    try {
+      window.open('/ui/runbook', '_blank');
+    } catch (e) {
+      // Fallback: navigate in-place
+      window.location.href = '/ui/runbook';
+    }
+  });
+
+  if (hubCmdLogBtn) hubCmdLogBtn.addEventListener('click', async () => {
+    try {
+      hubCmdLogBtn.disabled = true;
+      showHubCmdLogPanel(true);
+      await loadHubCmdLog(300);
+      log('Loaded hub command log.');
+    } catch (e) {
+      log(`Hub log failed: ${e.message}`);
+    } finally {
+      hubCmdLogBtn.disabled = false;
+    }
+  });
+
+  if (hubCmdLogRefreshBtn) hubCmdLogRefreshBtn.addEventListener('click', async () => {
+    try {
+      hubCmdLogRefreshBtn.disabled = true;
+      await loadHubCmdLog(300);
+    } catch (e) {
+      log(`Hub log refresh failed: ${e.message}`);
+    } finally {
+      hubCmdLogRefreshBtn.disabled = false;
+    }
+  });
+
+  if (hubCmdLogCloseBtn) hubCmdLogCloseBtn.addEventListener('click', () => {
+    showHubCmdLogPanel(false);
   });
 
   // Auto-refresh always on, no toggle
