@@ -831,7 +831,7 @@ async function loadAudioStatus(){
       const did = actionDeviceSelect ? actionDeviceSelect.value : '';
       beepBtn.disabled = true;
       log(`Beep: ${did}...`);
-      const r = await runDeviceAction('/ui/beep', did);
+      const r = await runDeviceAction('/ui/device/beep', did);
       log(`Beep result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
@@ -846,7 +846,7 @@ async function loadAudioStatus(){
       const did = actionDeviceSelect ? actionDeviceSelect.value : '';
       speakerTestBtn.disabled = true;
       log(`Speaker test: ${did}...`);
-      const r = await runDeviceAction('/ui/device/speaker_test', did);
+      const r = await runDeviceAction('/ui/device/speaker-test', did);
       log(`Speaker test result: ${JSON.stringify(r)}`);
       await refresh();
     } catch (e) {
