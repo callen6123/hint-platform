@@ -1091,6 +1091,28 @@ def require_ui_auth():
     resp.headers["WWW-Authenticate"] = 'Basic realm="Hint Hub"'
     return resp
 
+def require_ui_admin():
+    """Admin-only guard for selected UI pages (e.g. /dashboard).
+
+    Returns:
+      - None if authorized as admin
+      - A Flask Response (redirect for HTML pages, or 403 JSON)
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    cu = _current_ui_user() or {}
+    role = str(cu.get("role") or "").lower()
+    if role == "admin":
+        return None
+
+    # Browser page: redirect non-admin away from /dashboard
+    if _ui_wants_html() or (request.path or "") == "/dashboard":
+        return redirect("/speak")
+
+    # API-style call
+    return jsonify({"ok": False, "error": "admin_required"}), 403
 
 # --- Login/logout routes (session cookie) ---
 
@@ -1116,9 +1138,9 @@ def ui_login():
   <div class=\"page\" style=\"max-width: 520px; margin: 40px auto; padding: 16px;\">
     <h1 style=\"margin: 0 0 12px 0;\">Hint Hub</h1>
     <p style=\"margin: 0 0 18px 0; opacity: 0.85;\">Sign in to access the dashboard.</p>
-    {{f\"<div class='notice' style='margin-bottom:12px;color:#b00020;'>{msg}</div>\" if msg else \"\"}}
+    {{f\"<div class='notice' style='margin-bottom:12px;color:#b00020;'>{{msg}}</div>\" if msg else \"\"}}
     <form method=\"post\" action=\"/login\">
-      <input type=\"hidden\" name=\"next\" value=\"{nxt}\" />
+      <input type=\"hidden\" name=\"next\" value=\"{{nxt}}\" />
       <div style=\"display:flex; flex-direction:column; gap:10px;\">
         <label>Username<br><input name=\"username\" autocomplete=\"username\" style=\"width:100%; padding:10px;\" /></label>
         <label>Password<br><input name=\"password\" type=\"password\" autocomplete=\"current-password\" style=\"width:100%; padding:10px;\" /></label>
@@ -3411,7 +3433,7 @@ def ui_speak_page():
 # Dashboard HTML shell route
 @app.get("/dashboard")
 def dashboard():
-    ar = require_ui_auth()
+    ar = require_ui_admin()
     if ar is not None:
         return ar
     return render_template("dashboard.html")
