@@ -338,6 +338,7 @@ async function loadAudioStatus(){
         `<td>${pill(hubStatus)}</td>`+
         `<td><span class="muted">${esc(hubVer)}</span></td>`+
         `<td><button id="hubUpdate">Update Hub</button></td>`+
+        `<td></td>`+
       `</tr>`
     );
 
@@ -358,11 +359,14 @@ async function loadAudioStatus(){
           `<td>`+
             (did ? `<button data-action="buildUpdate" data-device="${esc(did)}">Build+Update</button>` : '')+
           `</td>`+
+          `<td>`+
+            (did ? `<button data-action="beep" data-device="${esc(did)}">Beep</button>` : '')+
+          `</td>`+
         `</tr>`
       );
     }
 
-    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="4" class="muted">No devices.</td></tr>';
+    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="5" class="muted">No devices.</td></tr>';
   }
 
   function hubHealthLabel(h){
@@ -1029,15 +1033,6 @@ async function loadAudioStatus(){
     showHubCmdLogPanel(false);
   });
 
-  // Auto-refresh always on, no toggle
-  refresh();
-  loadAudioStatus();
-  setInterval(() => {
-    refresh(); // includes /ui/health best-effort
-    rolloutStatusTick();
-    loadAudioStatus();
-  }, 5000);
-})();
   // Delegated handler for device action buttons (works for both hidden legacy table and STATUS table)
   document.addEventListener('click', async (ev) => {
     const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-action]') : null;
@@ -1050,23 +1045,33 @@ async function loadAudioStatus(){
 
     try {
       btn.disabled = true;
+
       if (action === 'update') {
         log(`Updating ${device}...`);
         const r = await api('/ui/update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
         log(`Update result: ${JSON.stringify(r)}`);
-      } else if (action === 'speakStop') {
-        log(`Speak stop requested for ${device} (target=${targetCmd || 'unknown'})...`);
-        const r = await api('/ui/speak/stop', 'POST', { device_id: device, target_command_id: targetCmd || null });
-        log(`Speak stop result: ${JSON.stringify(r)}`);
-      } else if (action === 'speakRetry') {
-        log(`Speak retry requested for ${device} (target=${targetCmd || 'unknown'})...`);
-        const r = await api('/ui/speak/retry', 'POST', { device_id: device, target_command_id: targetCmd || null });
-        log(`Speak retry result: ${JSON.stringify(r)}`);
+
       } else if (action === 'buildUpdate') {
         log(`Build+Update ${device}...`);
         const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
         log(`Build+Update result: ${JSON.stringify(r)}`);
+
+      } else if (action === 'beep') {
+        log(`Beep ${device}...`);
+        const r = await api('/ui/device/beep', 'POST', { device_id: device });
+        log(`Beep result: ${JSON.stringify(r)}`);
+
+      } else if (action === 'speakStop') {
+        log(`Speak stop requested for ${device} (target=${targetCmd || 'unknown'})...`);
+        const r = await api('/ui/speak/stop', 'POST', { device_id: device, target_command_id: targetCmd || null });
+        log(`Speak stop result: ${JSON.stringify(r)}`);
+
+      } else if (action === 'speakRetry') {
+        log(`Speak retry requested for ${device} (target=${targetCmd || 'unknown'})...`);
+        const r = await api('/ui/speak/retry', 'POST', { device_id: device, target_command_id: targetCmd || null });
+        log(`Speak retry result: ${JSON.stringify(r)}`);
       }
+
       await refresh();
     } catch (e) {
       log(`Action failed for ${device || action}: ${e.message}`);
@@ -1074,3 +1079,13 @@ async function loadAudioStatus(){
       btn.disabled = false;
     }
   });
+
+  // Auto-refresh always on, no toggle
+  refresh();
+  loadAudioStatus();
+  setInterval(() => {
+    refresh(); // includes /ui/health best-effort
+    rolloutStatusTick();
+    loadAudioStatus();
+  }, 5000);
+})();

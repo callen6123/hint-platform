@@ -11,8 +11,8 @@
   <header>
     <div class="controls">
       <span class="pill">Type & Tell Dashboard</span>
-      <a href="/speak" class="muted" style="text-decoration:none; margin-left:10px;">SPEAK PAGE</a>
-      <span class="muted">Auto-refresh: 5s</span>
+      <a href="/speak" id="speakBtn" style="margin-left:10px; text-decoration:none; display:inline-block; padding:8px 12px; border:1px solid rgba(255,255,255,0.18); border-radius:10px; background:rgba(255,255,255,0.06);">SPEAK PAGE</a>
+      <!-- <span class="muted">Auto-refresh: 5s</span> -->
     </div>
     <div class="controls right">
       <button id="refresh">Refresh</button>
@@ -36,10 +36,11 @@
             <th>Status</th>
             <th>Version</th>
             <th>Actions</th>
+            <th>Test</th>
           </tr>
         </thead>
         <tbody id="statusTbody">
-          <tr><td colspan="4" class="muted">Loading…</td></tr>
+          <tr><td colspan="5" class="muted">Loading…</td></tr>
         </tbody>
       </table>
     </div>
