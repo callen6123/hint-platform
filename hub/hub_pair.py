@@ -6,6 +6,7 @@ import subprocess
 import secrets
 import string
 import json
+import html as _html
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1126,25 +1127,35 @@ def ui_login():
     nxt = request.args.get("next") or "/dashboard"
     msg = request.args.get("msg") or ""
 
+    # Render message safely (avoid Jinja-looking artifacts inside an f-string)
+    msg = str(msg or "")
+    msg_html = ""
+    if msg:
+        msg_html = (
+            "<div class='notice' style='margin-bottom:12px;color:#b00020;'>"
+            + _html.escape(msg)
+            + "</div>"
+        )
+
     html = f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hint Hub Login</title>
-  <link rel=\"stylesheet\" href=\"/static/css/hub.css\" />
+  <link rel="stylesheet" href="/static/css/hub.css" />
 </head>
 <body>
-  <div class=\"page\" style=\"max-width: 520px; margin: 40px auto; padding: 16px;\">
-    <h1 style=\"margin: 0 0 12px 0;\">Hint Hub</h1>
-    <p style=\"margin: 0 0 18px 0; opacity: 0.85;\">Sign in to access the dashboard.</p>
-    {{f\"<div class='notice' style='margin-bottom:12px;color:#b00020;'>{{msg}}</div>\" if msg else \"\"}}
-    <form method=\"post\" action=\"/login\">
-      <input type=\"hidden\" name=\"next\" value=\"{{nxt}}\" />
-      <div style=\"display:flex; flex-direction:column; gap:10px;\">
-        <label>Username<br><input name=\"username\" autocomplete=\"username\" style=\"width:100%; padding:10px;\" /></label>
-        <label>Password<br><input name=\"password\" type=\"password\" autocomplete=\"current-password\" style=\"width:100%; padding:10px;\" /></label>
-        <button type=\"submit\" style=\"padding: 10px;\">Sign in</button>
+  <div class="page" style="max-width: 520px; margin: 40px auto; padding: 16px;">
+    <h1 style="margin: 0 0 12px 0;">Hint Hub</h1>
+    <p style="margin: 0 0 18px 0; opacity: 0.85;">Sign in to access the dashboard.</p>
+    {msg_html}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{nxt}" />
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <label>Username<br><input name="username" autocomplete="username" style="width:100%; padding:10px;" /></label>
+        <label>Password<br><input name="password" type="password" autocomplete="current-password" style="width:100%; padding:10px;" /></label>
+        <button type="submit" style="padding: 10px;">Sign in</button>
       </div>
     </form>
   </div>
@@ -1177,6 +1188,11 @@ def ui_login_post():
     u = str(form_user or "").strip()
     p = str(form_pw or "").strip()
     nxt = (request.form.get("next") if request.form else None) or (request.args.get("next") or "/dashboard")
+
+    # Prevent malformed/templated values (e.g. "{nxt}") and open redirects
+    nxt = str(nxt or "").strip()
+    if ("{" in nxt) or ("}" in nxt) or (not nxt.startswith("/")):
+        nxt = "/dashboard"
 
     v = _verify_ui_credentials(u, p)
     if v:
