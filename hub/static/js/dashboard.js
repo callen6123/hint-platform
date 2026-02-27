@@ -332,11 +332,16 @@ async function loadAudioStatus(){
 
     const rows = [];
 
+    const hubUpdAvail = (data && typeof data.hub_update_available === 'boolean') ? data.hub_update_available : null;
+    const hubUpdText = (hubUpdAvail === true) ? 'UPDATE AVAILABLE' : (hubUpdAvail === false ? 'UP TO DATE' : '—');
+    const hubUpdCls = (hubUpdAvail === true) ? 'status-offline' : (hubUpdAvail === false ? 'status-online' : 'muted');
+
     rows.push(
       `<tr>`+
         `<td><strong>HUB</strong></td>`+
         `<td>${pill(hubStatus)}</td>`+
         `<td><span class="muted">${esc(hubVer)}</span></td>`+
+        `<td><span class="${hubUpdCls}">${esc(hubUpdText)}</span></td>`+
         `<td><button id="hubUpdate">Update Hub</button></td>`+
         `<td></td>`+
       `</tr>`
@@ -351,11 +356,15 @@ async function loadAudioStatus(){
       const needsUpdate = otaLatest && avRaw && (avRaw !== '(unknown)') && (avRaw !== String(otaLatest));
       const av = needsUpdate ? `${avRaw} → ${otaLatest}` : avRaw;
 
+      const updText = needsUpdate ? 'UPDATE AVAILABLE' : 'UP TO DATE';
+      const updCls = needsUpdate ? 'status-offline' : 'status-online';
+
       rows.push(
         `<tr>`+
           `<td><strong>${esc(name)}</strong></td>`+
           `<td><span class="${statusClass(st)}">${esc(st)}</span></td>`+
           `<td><span class="muted">${esc(av)}</span></td>`+
+          `<td><span class="${updCls}">${esc(updText)}</span></td>`+
           `<td>`+
             (did ? `<button data-action="buildUpdate" data-device="${esc(did)}">Build+Update</button>` : '')+
           `</td>`+
@@ -366,7 +375,7 @@ async function loadAudioStatus(){
       );
     }
 
-    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="5" class="muted">No devices.</td></tr>';
+    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">No devices.</td></tr>';
   }
 
   function hubHealthLabel(h){
@@ -543,9 +552,9 @@ async function loadAudioStatus(){
       };
 
       const extra = [];
-      if (checks && checks.audio_cache_dir && checks.audio_cache_dir.path) {
-        extra.push(`<div class="muted">Audio dir: ${esc(checks.audio_cache_dir.path)}</div>`);
-      }
+      // if (checks && checks.audio_cache_dir && checks.audio_cache_dir.path) {
+      //   extra.push(`<div class="muted">Audio dir: ${esc(checks.audio_cache_dir.path)}</div>`);
+      // }
       if (checks && checks.elevenlabs_api && checks.elevenlabs_api.error) {
         extra.push(`<div class="muted">ElevenLabs: ${esc(checks.elevenlabs_api.error)}</div>`);
       }
