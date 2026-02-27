@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, abort, render_template, Response, session, redirect, url_for, make_response
+from flask import Flask, request, jsonify, send_file, abort, render_template, Response, session, redirect, url_for, make_response, g
 from jinja2 import ChoiceLoader, FileSystemLoader
 import os
 import sys
@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import urllib.request
 import urllib.error
+
+from werkzeug.security import generate_password_hash, check_password_hash
 
 import socket
 import threading
@@ -104,6 +106,7 @@ PAIR_CODE = "483921"  # you will type this into the device setup page
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
+UI_USERS_PATH = REGISTRY_DIR / "ui_users.json"
 
 # --- Hub audit log (append-only JSONL) ---
 HUB_LOG_DIR = Path("/var/lib/hint/logs")
@@ -760,6 +763,150 @@ def get_device_ui_cfg(device_id: str) -> dict:
     return v if isinstance(v, dict) else {}
 
 
+# --- UI users/auth storage ---
+
+def _default_users_payload() -> dict:
+    # Shape:
+    # {
+    #   "users": {
+    #     "admin": {"role": "admin", "password_hash": "...", "created_at": "...", "updated_at": "..."},
+    #     "gm": {"role": "gm", "password_hash": "...", "created_at": "...", "updated_at": "..."}
+    #   }
+    # }
+    return {"users": {}}
+
+
+def read_ui_users() -> dict:
+    d = _read_json_file(UI_USERS_PATH, default=_default_users_payload())
+    if not isinstance(d, dict):
+        d = _default_users_payload()
+    if not isinstance(d.get("users"), dict):
+        d["users"] = {}
+    return d
+
+
+def write_ui_users(d: dict) -> None:
+    ensure_registry_dir()
+    if not isinstance(d, dict):
+        d = _default_users_payload()
+    if not isinstance(d.get("users"), dict):
+        d["users"] = {}
+    _atomic_write_json(UI_USERS_PATH, d)
+
+
+def _bootstrap_ui_users_if_needed() -> dict:
+    """Ensure ui_users.json exists.
+
+    Bootstrap source of truth:
+      - If ui_users.json exists: use it.
+      - Else: require HINT_UI_USER/HINT_UI_PASS to seed an initial admin.
+        Optionally seed a GM user via HINT_UI_GM_USER/HINT_UI_GM_PASS.
+
+    This keeps backward compatibility with the original env-based single user.
+    """
+    if UI_USERS_PATH.exists():
+        return read_ui_users()
+
+    admin_user = (os.environ.get("HINT_UI_USER") or "").strip()
+    admin_pass = (os.environ.get("HINT_UI_PASS") or "").strip()
+    if not admin_user or not admin_pass:
+        # No file and no env seed; caller should treat as misconfigured.
+        return _default_users_payload()
+
+    now = utc_now_iso()
+    users = {
+        admin_user: {
+            "role": "admin",
+            "password_hash": generate_password_hash(admin_pass),
+            "created_at": now,
+            "updated_at": now,
+        }
+    }
+
+    gm_user = (os.environ.get("HINT_UI_GM_USER") or "").strip()
+    gm_pass = (os.environ.get("HINT_UI_GM_PASS") or "").strip()
+    if gm_user and gm_pass:
+        users[gm_user] = {
+            "role": "gm",
+            "password_hash": generate_password_hash(gm_pass),
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    payload = {"users": users}
+    try:
+        write_ui_users(payload)
+    except Exception:
+        # Best-effort; if permissions are wrong, auth will fail and health will show registry issues.
+        pass
+    return payload
+
+
+def _get_user_record(username: str) -> dict | None:
+    username = str(username or "").strip()
+    if not username:
+        return None
+    users_payload = _bootstrap_ui_users_if_needed()
+    users = users_payload.get("users") if isinstance(users_payload, dict) else None
+    if not isinstance(users, dict):
+        return None
+    rec = users.get(username)
+    return rec if isinstance(rec, dict) else None
+
+
+def _verify_ui_credentials(username: str, password: str) -> dict | None:
+    rec = _get_user_record(username)
+    if not rec:
+        return None
+    ph = rec.get("password_hash")
+    if not isinstance(ph, str) or not ph:
+        return None
+    try:
+        ok = check_password_hash(ph, str(password or ""))
+    except Exception:
+        ok = False
+    if not ok:
+        return None
+    return {"username": str(username).strip(), "role": str(rec.get("role") or "")}
+
+
+def _current_ui_user() -> dict | None:
+    # Session-based
+    try:
+        if session.get("ui_auth") is True:
+            u = str(session.get("ui_user") or "").strip()
+            r = str(session.get("ui_role") or "").strip()
+            if u:
+                return {"username": u, "role": r}
+    except Exception:
+        pass
+
+    # Basic auth fallback (env or ui_users)
+    auth = request.authorization
+    if auth and auth.username and auth.password:
+        # Prefer ui_users.json if present/bootstrapable
+        v = _verify_ui_credentials(auth.username, auth.password)
+        if v:
+            return v
+
+        # Back-compat: env user/pass
+        user_env = (os.environ.get("HINT_UI_USER") or "").strip()
+        pw_env = (os.environ.get("HINT_UI_PASS") or "").strip()
+        if user_env and pw_env and auth.username == user_env and auth.password == pw_env:
+            return {"username": user_env, "role": "admin"}
+
+    return None
+
+
+def _require_admin_user() -> dict | None:
+    cu = _current_ui_user()
+    if not cu:
+        return None
+    if str(cu.get("role") or "").lower() == "admin":
+        return cu
+    return None
+
+
 def upsert_device(device_id: str, site_id: str, mqtt_user: str, ota_token: str) -> None:
     reg = read_registry()
     rec = reg.get(device_id) if isinstance(reg, dict) else None
@@ -879,23 +1026,30 @@ def require_dashboard_key() -> None:
 
 
 
+
 # UI auth.
 # Primary UX: cookie-based session set by /login.
 # Fallback: HTTP Basic Auth (still useful for curl/debugging).
 
 def _ui_basic_auth_ok() -> bool:
-    user = (os.environ.get("HINT_UI_USER") or "").strip()
-    pw = (os.environ.get("HINT_UI_PASS") or "").strip()
-    if not user or not pw:
+    # Back-compat for curl/debugging: allow either ui_users.json credentials or env credentials.
+    auth = request.authorization
+    if not auth or not auth.username or not auth.password:
         return False
 
-    auth = request.authorization
-    return bool(auth and auth.username == user and auth.password == pw)
+    # Prefer ui_users.json
+    if _verify_ui_credentials(auth.username, auth.password):
+        return True
+
+    # Fallback to env
+    user = (os.environ.get("HINT_UI_USER") or "").strip()
+    pw = (os.environ.get("HINT_UI_PASS") or "").strip()
+    return bool(user and pw and auth.username == user and auth.password == pw)
 
 
 def _ui_session_ok() -> bool:
     try:
-        return bool(session.get("ui_auth") is True)
+        return bool(session.get("ui_auth") is True and str(session.get("ui_user") or "").strip())
     except Exception:
         return False
 
@@ -912,10 +1066,13 @@ def require_ui_auth():
       - None if authorized
       - A Flask Response (redirect to /login for HTML pages, or 401 JSON)
     """
-    if _ui_session_ok():
-        return None
-
-    if _ui_basic_auth_ok():
+    cu = _current_ui_user()
+    if cu:
+        # Stash on Flask global for convenience
+        try:
+            g.ui_user = cu
+        except Exception:
+            pass
         return None
 
     path = request.path or ""
@@ -940,7 +1097,7 @@ def require_ui_auth():
 @app.get("/login")
 def ui_login():
     # If already authed, go to dashboard (or next)
-    if _ui_session_ok() or _ui_basic_auth_ok():
+    if _current_ui_user() is not None:
         nxt = request.args.get("next") or "/dashboard"
         return redirect(nxt)
 
@@ -979,9 +1136,11 @@ def ui_login():
 
 @app.post("/login")
 def ui_login_post():
-    user = (os.environ.get("HINT_UI_USER") or "").strip()
-    pw = (os.environ.get("HINT_UI_PASS") or "").strip()
-    if not user or not pw:
+    # Ensure user store exists (or is bootstrapped from env on first run)
+    users_payload = _bootstrap_ui_users_if_needed()
+    users = users_payload.get("users") if isinstance(users_payload, dict) else None
+    if not isinstance(users, dict) or len(users) == 0:
+        # No users configured and no env seed available
         abort(403)
 
     # Support form POST primarily, JSON as fallback
@@ -997,8 +1156,11 @@ def ui_login_post():
     p = str(form_pw or "").strip()
     nxt = (request.form.get("next") if request.form else None) or (request.args.get("next") or "/dashboard")
 
-    if u == user and p == pw:
+    v = _verify_ui_credentials(u, p)
+    if v:
         session["ui_auth"] = True
+        session["ui_user"] = v.get("username")
+        session["ui_role"] = v.get("role")
         session.permanent = True
         return redirect(nxt)
 
@@ -1015,6 +1177,135 @@ def ui_logout():
     except Exception:
         pass
     return redirect("/login")
+
+
+# --- UI user management endpoints ---
+
+@app.get("/ui/me")
+def ui_me():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+    cu = _current_ui_user() or {}
+    return jsonify({
+        "ok": True,
+        "username": cu.get("username"),
+        "role": cu.get("role"),
+    })
+
+
+@app.post("/ui/me/password")
+def ui_change_my_password():
+    """Change password for the currently logged-in user.
+
+    Body:
+      {"current_password": "...", "new_password": "..."}
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    cu = _current_ui_user()
+    if not cu:
+        return jsonify({"ok": False, "error": "auth_required"}), 401
+
+    body = request.get_json(silent=True) or {}
+    cur = str(body.get("current_password") or "").strip()
+    newp = str(body.get("new_password") or "").strip()
+
+    if not cur or not newp:
+        return jsonify({"ok": False, "error": "current_password_and_new_password_required"}), 400
+    if len(newp) < 8:
+        return jsonify({"ok": False, "error": "new_password_too_short", "min_len": 8}), 400
+
+    v = _verify_ui_credentials(str(cu.get("username") or ""), cur)
+    if not v:
+        return jsonify({"ok": False, "error": "invalid_current_password"}), 400
+
+    users_payload = read_ui_users()
+    users = users_payload.get("users") if isinstance(users_payload, dict) else None
+    if not isinstance(users, dict):
+        return jsonify({"ok": False, "error": "user_store_corrupt"}), 500
+
+    uname = str(cu.get("username") or "").strip()
+    rec = users.get(uname)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_user"}), 404
+
+    rec = dict(rec)
+    rec["password_hash"] = generate_password_hash(newp)
+    rec["updated_at"] = utc_now_iso()
+    users[uname] = rec
+    users_payload["users"] = users
+    write_ui_users(users_payload)
+
+    _append_hub_cmd_log({
+        "event": "ui_password_changed",
+        "username": uname,
+        "role": str(rec.get("role") or ""),
+    })
+
+    return jsonify({"ok": True})
+
+
+@app.post("/ui/admin/gm")
+def ui_admin_create_or_reset_gm():
+    """Admin: create or reset the game master user.
+
+    Body:
+      {"username": "gm" (optional), "password": "..."}
+
+    Notes:
+      - If username omitted, defaults to "gm".
+      - Creates the user if missing.
+      - Always sets/overwrites the password.
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    admin = _require_admin_user()
+    if not admin:
+        return jsonify({"ok": False, "error": "admin_required"}), 403
+
+    body = request.get_json(silent=True) or {}
+    uname = str(body.get("username") or "gm").strip()
+    pw = str(body.get("password") or "").strip()
+
+    if not uname:
+        return jsonify({"ok": False, "error": "username_required"}), 400
+    if not pw:
+        return jsonify({"ok": False, "error": "password_required"}), 400
+    if len(pw) < 8:
+        return jsonify({"ok": False, "error": "password_too_short", "min_len": 8}), 400
+
+    users_payload = _bootstrap_ui_users_if_needed()
+    users = users_payload.get("users") if isinstance(users_payload, dict) else None
+    if not isinstance(users, dict):
+        return jsonify({"ok": False, "error": "user_store_corrupt"}), 500
+
+    now = utc_now_iso()
+    existing = users.get(uname)
+    created = not isinstance(existing, dict)
+
+    users[uname] = {
+        "role": "gm",
+        "password_hash": generate_password_hash(pw),
+        "created_at": (existing.get("created_at") if isinstance(existing, dict) else now),
+        "updated_at": now,
+    }
+
+    users_payload["users"] = users
+    write_ui_users(users_payload)
+
+    _append_hub_cmd_log({
+        "event": "ui_gm_set",
+        "admin_username": str(admin.get("username") or ""),
+        "gm_username": uname,
+        "created": created,
+    })
+
+    return jsonify({"ok": True, "username": uname, "created": created})
 
 
 def mqtt_admin_cfg() -> tuple[str, int, str, str]:

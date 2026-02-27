@@ -18,6 +18,25 @@
   const hubCmdLogRefreshBtn = $("hubCmdLogRefreshBtn");
   const hubCmdLogCloseBtn = $("hubCmdLogCloseBtn");
 
+  // Optional: Account controls (only present if dashboard.html includes them)
+  const accountBtn = $("accountBtn");
+  const logoutBtn = $("logoutBtn");
+  const accountPanel = $("accountPanel");
+  const accountClose = $("accountClose");
+  const accountUser = $("accountUser");
+  const accountRole = $("accountRole");
+  const adminGmSection = $("adminGmSection");
+
+  const myPwCurrent = $("myPwCurrent");
+  const myPwNew = $("myPwNew");
+  const myPwSave = $("myPwSave");
+  const myPwMsg = $("myPwMsg");
+
+  const gmUsername = $("gmUsername");
+  const gmPassword = $("gmPassword");
+  const gmSet = $("gmSet");
+  const gmMsg = $("gmMsg");
+
   function populateActionDeviceSelect(devices){
     if (!actionDeviceSelect) return;
 
@@ -189,6 +208,27 @@ async function loadAudioStatus(){
       throw new Error(`${res.status} ${res.statusText}: ${JSON.stringify(data)}`);
     }
     return data;
+  }
+
+  async function loadMe(){
+    const me = await api('/ui/me', 'GET');
+    if (accountUser) accountUser.textContent = me.username || '—';
+    if (accountRole) accountRole.textContent = me.role || '—';
+    const isAdmin = String(me.role || '').toLowerCase() === 'admin';
+    if (adminGmSection) adminGmSection.style.display = isAdmin ? '' : 'none';
+    return me;
+  }
+
+  function showAccountPanel(show){
+    if (!accountPanel) return;
+    accountPanel.style.display = show ? '' : 'none';
+    if (show) {
+      if (myPwMsg) myPwMsg.textContent = '';
+      if (gmMsg) gmMsg.textContent = '';
+      if (myPwCurrent) myPwCurrent.value = '';
+      if (myPwNew) myPwNew.value = '';
+      if (gmPassword) gmPassword.value = '';
+    }
   }
 
   async function fetchText(path){
@@ -788,6 +828,74 @@ async function loadAudioStatus(){
 
   const refreshBtn = $("refresh");
   if (refreshBtn) refreshBtn.addEventListener('click', refresh);
+
+  // Account wiring (optional)
+  if (accountBtn) accountBtn.addEventListener('click', async () => {
+    try {
+      accountBtn.disabled = true;
+      await loadMe();
+      showAccountPanel(true);
+    } catch (e) {
+      log(`Account load failed: ${e.message}`);
+      alert(`Account load failed: ${e.message}`);
+    } finally {
+      accountBtn.disabled = false;
+    }
+  });
+
+  if (accountClose) accountClose.addEventListener('click', () => showAccountPanel(false));
+
+  if (logoutBtn) logoutBtn.addEventListener('click', async () => {
+    try {
+      logoutBtn.disabled = true;
+      await fetch('/logout', { method: 'POST' });
+    } catch(e) {
+      // ignore
+    } finally {
+      window.location.href = '/login';
+    }
+  });
+
+  if (myPwSave) myPwSave.addEventListener('click', async () => {
+    if (myPwMsg) myPwMsg.textContent = '';
+    const current_password = (myPwCurrent && myPwCurrent.value ? myPwCurrent.value : '').trim();
+    const new_password = (myPwNew && myPwNew.value ? myPwNew.value : '').trim();
+    if (!current_password || !new_password) {
+      if (myPwMsg) myPwMsg.textContent = 'Current and new password are required.';
+      return;
+    }
+    try {
+      myPwSave.disabled = true;
+      await api('/ui/me/password', 'POST', { current_password, new_password });
+      if (myPwMsg) myPwMsg.textContent = 'Password updated.';
+      if (myPwCurrent) myPwCurrent.value = '';
+      if (myPwNew) myPwNew.value = '';
+    } catch (e) {
+      if (myPwMsg) myPwMsg.textContent = `Update failed: ${e.message}`;
+    } finally {
+      myPwSave.disabled = false;
+    }
+  });
+
+  if (gmSet) gmSet.addEventListener('click', async () => {
+    if (gmMsg) gmMsg.textContent = '';
+    const username = (gmUsername && gmUsername.value ? gmUsername.value : 'gm').trim();
+    const password = (gmPassword && gmPassword.value ? gmPassword.value : '').trim();
+    if (!password) {
+      if (gmMsg) gmMsg.textContent = 'GM password is required.';
+      return;
+    }
+    try {
+      gmSet.disabled = true;
+      const r = await api('/ui/admin/gm', 'POST', { username, password });
+      if (gmMsg) gmMsg.textContent = r.created ? `GM user "${r.username}" created.` : `GM user "${r.username}" password reset.`;
+      if (gmPassword) gmPassword.value = '';
+    } catch (e) {
+      if (gmMsg) gmMsg.textContent = `GM update failed: ${e.message}`;
+    } finally {
+      gmSet.disabled = false;
+    }
+  });
 
   const hubUpdateBtn = $("hubUpdate");
   if (hubUpdateBtn) hubUpdateBtn.addEventListener('click', async () => {

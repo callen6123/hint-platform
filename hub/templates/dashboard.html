@@ -22,6 +22,10 @@
       <button id="buildUpdateAll">Build+Update All</button>
       <button id="hubCmdLogBtn" title="View hub command/audit log">Hub Cmd Log</button>
       <button id="runbookBtn" title="Open runbook">Runbook</button>
+
+      <button id="accountBtn" title="Account settings" style="margin-left:10px;">Account</button>
+      <button id="logoutBtn" title="Sign out">Logout</button>
+
       <span class="muted" style="margin-left:10px;">Audio:</span>
       <button id="beepBtn" title="Send a short beep to a device">Beep</button>
       <button id="speakerTestBtn" title="Run the device speaker test (beep)">Speaker Test</button>
@@ -29,6 +33,44 @@
   </header>
   <main>
     <div id="banner" class="panel" style="display:none;"></div>
+
+    <div class="panel" id="accountPanel" style="display:none;">
+      <h3>Account</h3>
+      <div class="kv" style="margin-bottom:10px;">
+        <div><span class="muted">Signed in as:</span> <span id="accountUser">—</span></div>
+        <div><span class="muted">Role:</span> <span id="accountRole">—</span></div>
+      </div>
+
+      <h4 style="margin: 14px 0 8px;">Change my password</h4>
+      <div class="controls" style="flex-wrap:wrap; gap:10px;">
+        <label>Current
+          <input id="myPwCurrent" type="password" autocomplete="current-password" style="min-width:220px;" />
+        </label>
+        <label>New
+          <input id="myPwNew" type="password" autocomplete="new-password" style="min-width:220px;" />
+        </label>
+        <button id="myPwSave">Update Password</button>
+      </div>
+      <div class="muted" id="myPwMsg" style="margin-top:6px;"></div>
+
+      <div id="adminGmSection" style="display:none;">
+        <h4 style="margin: 18px 0 8px;">Admin: Game Master account</h4>
+        <div class="controls" style="flex-wrap:wrap; gap:10px;">
+          <label>GM Username
+            <input id="gmUsername" type="text" value="gm" style="min-width:180px;" />
+          </label>
+          <label>GM Password
+            <input id="gmPassword" type="password" autocomplete="new-password" style="min-width:220px;" />
+          </label>
+          <button id="gmSet">Create/Reset GM</button>
+        </div>
+        <div class="muted" id="gmMsg" style="margin-top:6px;"></div>
+      </div>
+
+      <div class="controls" style="margin-top:14px;">
+        <button id="accountClose">Close</button>
+      </div>
+    </div>
 
     <div class="panel" id="hubCmdLogPanel" style="display:none;">
       <h3>Hub Command Log</h3>
