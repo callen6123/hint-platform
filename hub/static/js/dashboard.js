@@ -555,7 +555,6 @@ async function loadAudioStatus(){
 
       parts.push(
         `<div style="margin-top:10px;">
-          // <h3 style="margin:0 0 8px 0; font-size:14px;">Hub Health</h3>
           <div><b>Overall:</b> <span class="pill">${esc(hubHealthLabel(overall))}</span></div>
           <div><b>MQTT:</b> ${pill(mqttOk)} <span class="muted">${mqttOk === false ? '(not connected)' : ''}</span></div>
           <div><b>Audio:</b> ${pill(audioOk)}</div>
