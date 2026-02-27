@@ -485,35 +485,35 @@ async function loadAudioStatus(){
     }
 
     const parts = [];
-    if (info.hubHealth) {
-      const hh = String(info.hubHealth).toLowerCase();
-      if (hh === 'ok') parts.push(`<div><b>Hub:</b> <span class="pill">OK</span></div>`);
-      else if (hh === 'error') parts.push(`<div><b>Hub:</b> <span class="pill">ERROR</span> <span class="muted">(unreachable)</span></div>`);
-      else parts.push(`<div><b>Hub:</b> <span class="muted">unknown</span></div>`);
-    }
-    if (info.otaLatest) {
-      parts.push(`<div><b>Device OTA:</b> latest <span class="pill">${info.otaLatest}</span></div>`);
-    } else {
-      parts.push(`<div><b>Device OTA:</b> <span class="muted">no bundle built yet</span></div>`);
-    }
+    // if (info.hubHealth) {
+    //   const hh = String(info.hubHealth).toLowerCase();
+    //   if (hh === 'ok') parts.push(`<div><b>Hub:</b> <span class="pill">OK</span></div>`);
+    //   else if (hh === 'error') parts.push(`<div><b>Hub:</b> <span class="pill">ERROR</span> <span class="muted">(unreachable)</span></div>`);
+    //   else parts.push(`<div><b>Hub:</b> <span class="muted">unknown</span></div>`);
+    // }
+    // if (info.otaLatest) {
+    //   parts.push(`<div><b>Device OTA:</b> latest <span class="pill">${info.otaLatest}</span></div>`);
+    // } else {
+    //   parts.push(`<div><b>Device OTA:</b> <span class="muted">no bundle built yet</span></div>`);
+    // }
 
-    if (info.hubVer) {
-      const hv = `<span class="pill">${info.hubVer}</span>`;
-      if (info.hubUpd === true) {
-        const hl = info.hubLatest ? `<span class="pill">${info.hubLatest}</span>` : `<span class="muted">(unknown)</span>`;
-        parts.push(`<div><b>Hub:</b> ${hv} → ${hl} <span class="muted">(update available)</span></div>`);
-      } else if (info.hubUpd === false) {
-        parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(up to date)</span></div>`);
-      } else {
-        parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(update status unknown)</span></div>`);
-      }
-    } else {
-      parts.push(`<div><b>Hub:</b> <span class="muted">version unknown</span></div>`);
-    }
+    // if (info.hubVer) {
+    //   const hv = `<span class="pill">${info.hubVer}</span>`;
+    //   if (info.hubUpd === true) {
+    //     const hl = info.hubLatest ? `<span class="pill">${info.hubLatest}</span>` : `<span class="muted">(unknown)</span>`;
+    //     parts.push(`<div><b>Hub:</b> ${hv} → ${hl} <span class="muted">(update available)</span></div>`);
+    //   } else if (info.hubUpd === false) {
+    //     parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(up to date)</span></div>`);
+    //   } else {
+    //     parts.push(`<div><b>Hub:</b> ${hv} <span class="muted">(update status unknown)</span></div>`);
+    //   }
+    // } else {
+    //   parts.push(`<div><b>Hub:</b> <span class="muted">version unknown</span></div>`);
+    // }
 
-    if (info.hubErr) {
-      parts.push(`<div class="muted">Hub update check error: ${String(info.hubErr)}</div>`);
-    }
+    // if (info.hubErr) {
+    //   parts.push(`<div class="muted">Hub update check error: ${String(info.hubErr)}</div>`);
+    // }
 
     // Optional hub health panel (if we have /ui/health)
     if (info.hubHealthDetail && typeof info.hubHealthDetail === 'object') {
@@ -565,7 +565,7 @@ async function loadAudioStatus(){
       );
     }
 
-    b.innerHTML = `<h3 style="margin:0 0 8px 0; font-size:14px;">Updates</h3>` + parts.join('');
+    // b.innerHTML = `<h3 style="margin:0 0 8px 0; font-size:14px;">Updates</h3>` + parts.join('');
     b.style.display = '';
   }
 
