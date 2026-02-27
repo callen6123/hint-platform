@@ -1,6 +1,7 @@
 (function(){
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
+  const statusTbody = $("statusTbody");
 
   // Cached device list from /ui/status for UI controls
   let _devicesCache = [];
@@ -313,6 +314,57 @@ async function loadAudioStatus(){
       .replaceAll("'",'&#39;');
   }
 
+  function pill(text){
+    return `<span class="pill">${esc(text)}</span>`;
+  }
+
+  function renderStatusPanel(data){
+    if (!statusTbody) return;
+
+    const devices = Array.isArray(data && data.devices) ? data.devices : [];
+    const otaLatest = data ? (data.ota_latest_version || null) : null;
+
+    // HUB status + version
+    const hubH = (data && typeof data === 'object') ? (data.hub_health || null) : null;
+    const hubOk = !!(hubH && hubH.ok);
+    const hubStatus = hubH ? (hubOk ? 'OK' : 'ERR') : '—';
+    const hubVer = (data && data.hub_version) ? String(data.hub_version) : '—';
+
+    const rows = [];
+
+    rows.push(
+      `<tr>`+
+        `<td><strong>HUB</strong></td>`+
+        `<td>${pill(hubStatus)}</td>`+
+        `<td><span class="muted">${esc(hubVer)}</span></td>`+
+        `<td><button id="hubUpdate">Update Hub</button></td>`+
+      `</tr>`
+    );
+
+    for (const d of devices){
+      const did = String((d && d.device_id) || '');
+      const name = String((d && (d.friendly_name || d.device_id)) || 'Device');
+      const st = normStatus(d); // 'online' / 'offline'
+
+      const avRaw = String((d && d.agent_version) || '(unknown)');
+      const needsUpdate = otaLatest && avRaw && (avRaw !== '(unknown)') && (avRaw !== String(otaLatest));
+      const av = needsUpdate ? `${avRaw} → ${otaLatest}` : avRaw;
+
+      rows.push(
+        `<tr>`+
+          `<td><strong>${esc(name)}</strong></td>`+
+          `<td><span class="${statusClass(st)}">${esc(st)}</span></td>`+
+          `<td><span class="muted">${esc(av)}</span></td>`+
+          `<td>`+
+            (did ? `<button data-action="buildUpdate" data-device="${esc(did)}">Build+Update</button>` : '')+
+          `</td>`+
+        `</tr>`
+      );
+    }
+
+    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="4" class="muted">No devices.</td></tr>';
+  }
+
   function hubHealthLabel(h){
     h = String(h || '').toLowerCase();
     if (h === 'ok') return 'Hub OK';
@@ -595,6 +647,7 @@ async function loadAudioStatus(){
       });
 
       render(devices, otaLatest);
+      renderStatusPanel(data);
     } catch (e) {
       renderBanner(null);
       render([]);
@@ -650,38 +703,6 @@ async function loadAudioStatus(){
       `;
     }).join('');
 
-    tbody.querySelectorAll('button[data-action]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const action = btn.getAttribute('data-action');
-        const device = btn.getAttribute('data-device');
-        const targetCmd = btn.getAttribute('data-cmd');
-        try {
-          btn.disabled = true;
-          if (action === 'update') {
-            log(`Updating ${device}...`);
-            const r = await api('/ui/update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
-            log(`Update result: ${JSON.stringify(r)}`);
-          } else if (action === 'speakStop') {
-            log(`Speak stop requested for ${device} (target=${targetCmd || 'unknown'})...`);
-            const r = await api('/ui/speak/stop', 'POST', { device_id: device, target_command_id: targetCmd || null });
-            log(`Speak stop result: ${JSON.stringify(r)}`);
-          } else if (action === 'speakRetry') {
-            log(`Speak retry requested for ${device} (target=${targetCmd || 'unknown'})...`);
-            const r = await api('/ui/speak/retry', 'POST', { device_id: device, target_command_id: targetCmd || null });
-            log(`Speak retry result: ${JSON.stringify(r)}`);
-          } else {
-            log(`Build+Update ${device}...`);
-            const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
-            log(`Build+Update result: ${JSON.stringify(r)}`);
-          }
-          await refresh();
-        } catch (e) {
-          log(`Action failed for ${device}: ${e.message}`);
-        } finally {
-          btn.disabled = false;
-        }
-      });
-    });
   }
 
   // API key UI removed
@@ -897,15 +918,21 @@ async function loadAudioStatus(){
     }
   });
 
-  const hubUpdateBtn = $("hubUpdate");
-  if (hubUpdateBtn) hubUpdateBtn.addEventListener('click', async () => {
+  // Delegated handler (button is rendered dynamically inside STATUS table)
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('#hubUpdate') : null;
+    if (!btn) return;
+
     try {
+      btn.disabled = true;
       log('Starting hub update (git pull + restart services)...');
       const r = await api('/ui/hub/update', 'POST', {});
       log(`Hub update triggered: ${JSON.stringify(r)}`);
       log('If hub services restart, the page may briefly fail to refresh; wait a few seconds then refresh.');
     } catch (e) {
       log(`Hub update failed: ${e.message}`);
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -1011,3 +1038,39 @@ async function loadAudioStatus(){
     loadAudioStatus();
   }, 5000);
 })();
+  // Delegated handler for device action buttons (works for both hidden legacy table and STATUS table)
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-action]') : null;
+    if (!btn) return;
+
+    const action = btn.getAttribute('data-action');
+    const device = btn.getAttribute('data-device');
+    const targetCmd = btn.getAttribute('data-cmd');
+    if (!action) return;
+
+    try {
+      btn.disabled = true;
+      if (action === 'update') {
+        log(`Updating ${device}...`);
+        const r = await api('/ui/update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
+        log(`Update result: ${JSON.stringify(r)}`);
+      } else if (action === 'speakStop') {
+        log(`Speak stop requested for ${device} (target=${targetCmd || 'unknown'})...`);
+        const r = await api('/ui/speak/stop', 'POST', { device_id: device, target_command_id: targetCmd || null });
+        log(`Speak stop result: ${JSON.stringify(r)}`);
+      } else if (action === 'speakRetry') {
+        log(`Speak retry requested for ${device} (target=${targetCmd || 'unknown'})...`);
+        const r = await api('/ui/speak/retry', 'POST', { device_id: device, target_command_id: targetCmd || null });
+        log(`Speak retry result: ${JSON.stringify(r)}`);
+      } else if (action === 'buildUpdate') {
+        log(`Build+Update ${device}...`);
+        const r = await api('/ui/build-and-update', 'POST', { device_id: device, command_id: `cmd-${device}-${Date.now()}` });
+        log(`Build+Update result: ${JSON.stringify(r)}`);
+      }
+      await refresh();
+    } catch (e) {
+      log(`Action failed for ${device || action}: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+    }
+  });
