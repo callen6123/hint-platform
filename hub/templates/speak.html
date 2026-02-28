@@ -169,17 +169,131 @@
       </div>
     </details>
 
-    <div class="panel" style="margin-top:14px;">
-      <h3 style="margin:0 0 8px 0; font-size:14px;">Saved phrases</h3>
-      <div class="row">
-        <input id="phraseLabel" type="text" placeholder="Label (e.g., Hint 1)" />
-        <button id="savePhraseBtn">Save phrase</button>
-        <button id="deletePhraseBtn" class="danger" disabled>Delete selected</button>
-        <span class="muted small" id="phraseStatus"></span>
+    <details class="panel" style="margin-top:14px;">
+      <summary style="cursor:pointer; user-select:none; list-style:none;">
+        <span style="font-weight:600; font-size:14px;">Frequently Used Audio Playback</span>
+        <span class="muted" style="margin-left:8px;">(click to expand)</span>
+      </summary>
+
+      <div style="margin-top:10px;">
+        <div class="muted small" style="margin-bottom:8px;">
+          Plays your 10 most common phrases instantly (no ElevenLabs call).
+        </div>
+
+        <div class="freq-play" id="freqPlay">
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center;">
+            <label style="min-width:40px; margin:0;">1</label>
+            <button class="freqAudioPlay" data-key="freq_1" id="freq_play_1" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">2</label>
+            <button class="freqAudioPlay" data-key="freq_2" id="freq_play_2" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">3</label>
+            <button class="freqAudioPlay" data-key="freq_3" id="freq_play_3" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">4</label>
+            <button class="freqAudioPlay" data-key="freq_4" id="freq_play_4" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">5</label>
+            <button class="freqAudioPlay" data-key="freq_5" id="freq_play_5" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">6</label>
+            <button class="freqAudioPlay" data-key="freq_6" id="freq_play_6" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">7</label>
+            <button class="freqAudioPlay" data-key="freq_7" id="freq_play_7" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">8</label>
+            <button class="freqAudioPlay" data-key="freq_8" id="freq_play_8" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">9</label>
+            <button class="freqAudioPlay" data-key="freq_9" id="freq_play_9" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">10</label>
+            <button class="freqAudioPlay" data-key="freq_10" id="freq_play_10" style="flex:1; text-align:left;">(empty)</button>
+          </div>
+        </div>
+
+        <div class="muted small" id="freqAudioPlayStatus" style="margin-top:10px;"></div>
       </div>
-      <div class="muted small" style="margin-top:6px;">Click a phrase to load its text. Save overwrites if a phrase is selected.</div>
-      <div class="phrases" id="phrases"></div>
-    </div>
+    </details>
+
+    <details class="panel" style="margin-top:14px;">
+      <summary style="cursor:pointer; user-select:none; list-style:none;">
+        <span style="font-weight:600; font-size:14px;">Frequently Used Audio Generation</span>
+        <span class="muted" style="margin-left:8px;">(click to expand)</span>
+      </summary>
+
+      <div style="margin-top:10px;">
+        <div class="muted small" style="margin-bottom:8px;">
+          Create / replace up to 10 frequent phrases. Audio is pinned on the hub and can be replayed instantly.
+        </div>
+
+        <div class="freq-gen" id="freqGen">
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center;">
+            <label style="min-width:40px; margin:0;">1</label>
+            <input class="freqAudioText" id="freq_text_1" data-key="freq_1" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_1" id="freq_gen_1">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">2</label>
+            <input class="freqAudioText" id="freq_text_2" data-key="freq_2" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_2" id="freq_gen_2">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">3</label>
+            <input class="freqAudioText" id="freq_text_3" data-key="freq_3" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_3" id="freq_gen_3">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">4</label>
+            <input class="freqAudioText" id="freq_text_4" data-key="freq_4" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_4" id="freq_gen_4">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">5</label>
+            <input class="freqAudioText" id="freq_text_5" data-key="freq_5" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_5" id="freq_gen_5">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">6</label>
+            <input class="freqAudioText" id="freq_text_6" data-key="freq_6" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_6" id="freq_gen_6">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">7</label>
+            <input class="freqAudioText" id="freq_text_7" data-key="freq_7" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_7" id="freq_gen_7">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">8</label>
+            <input class="freqAudioText" id="freq_text_8" data-key="freq_8" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_8" id="freq_gen_8">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">9</label>
+            <input class="freqAudioText" id="freq_text_9" data-key="freq_9" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_9" id="freq_gen_9">Generate Audio</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
+            <label style="min-width:40px; margin:0;">10</label>
+            <input class="freqAudioText" id="freq_text_10" data-key="freq_10" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
+            <button class="freqAudioGen" data-key="freq_10" id="freq_gen_10">Generate Audio</button>
+          </div>
+        </div>
+
+        <div class="muted small" id="freqAudioGenStatus" style="margin-top:10px;"></div>
+      </div>
+    </details>
   </div>
 
   <!-- <div class="log" id="log"></div> -->

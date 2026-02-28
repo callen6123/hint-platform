@@ -248,10 +248,27 @@
     el.textContent = s || '';
   }
 
-  function setSavedAudioPlayStatus(s){
-    const el = $("savedAudioPlayStatus");
+  function setFreqAudioGenStatus(s){
+    const el = $("freqAudioGenStatus");
     if (!el) return;
     el.textContent = s || '';
+  }
+
+  function setFreqAudioPlayStatus(s){
+    const el = $("freqAudioPlayStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
+  function snippetText(text, maxLen){
+    const max = (typeof maxLen === 'number' && maxLen > 10) ? maxLen : 42;
+    const t = String(text || '').trim().replace(/\s+/g, ' ');
+    if (!t) return '';
+    return t.length <= max ? t : (t.slice(0, max - 1) + '…');
+  }
+
+  function isFreqKey(key){
+    return /^freq_(?:[1-9]|10)$/.test(String(key || ''));
   }
 
   async function loadSavedAudioDefs(){
@@ -268,6 +285,15 @@
         }
       });
 
+      // Frequently Used Audio (freq_1..freq_10): prefill text inputs
+      document.querySelectorAll('input.freqAudioText').forEach(inp => {
+        const key = inp.getAttribute('data-key') || '';
+        const it = items[key] || null;
+        if (it && typeof it.text === 'string' && !inp.value) {
+          inp.value = it.text;
+        }
+      });
+
       document.querySelectorAll('button.savedAudioPlay').forEach(btn => {
         const key = btn.getAttribute('data-key') || '';
         const it = items[key] || null;
@@ -275,6 +301,27 @@
         if (it && typeof it.exists === 'boolean') {
           btn.disabled = !it.exists;
           btn.title = it.exists ? 'Play saved audio' : 'No saved audio yet (generate first)';
+        }
+      });
+
+      // Frequently Used Audio Playback buttons: label = snippet of stored text
+      document.querySelectorAll('button.freqAudioPlay').forEach(btn => {
+        const key = btn.getAttribute('data-key') || '';
+        const it = items[key] || null;
+        const txt = (it && typeof it.text === 'string') ? it.text : '';
+        const snip = snippetText(txt, 60);
+
+        // Always show a usable label
+        btn.textContent = snip || '(empty)';
+
+        if (it && typeof it.exists === 'boolean') {
+          btn.disabled = !it.exists;
+          btn.title = it.exists ? 'Play saved audio' : 'No saved audio yet (generate first)';
+        } else {
+          // If list endpoint doesn't provide exists, guess from audio_id
+          const has = !!(it && (it.audio_id || it.id));
+          btn.disabled = !has;
+          btn.title = has ? 'Play saved audio' : 'No saved audio yet (generate first)';
         }
       });
     } catch(e) {
@@ -408,10 +455,13 @@
     setStatus('Ready');
     log(`Loaded devices=${devices.length}, voices=${voices.length}`);
 
-    const phrases = await loadPhrases();
-    renderPhrases(phrases);
-    setSelectedPhrase('');
-    setPhraseStatus('');
+    // Saved phrases panel was removed; keep code safe if elements are missing.
+    if ($("phrases")) {
+      const phrases = await loadPhrases();
+      renderPhrases(phrases);
+      setSelectedPhrase('');
+      setPhraseStatus('');
+    }
 
     // Prefill Saved Audio inputs / enable play buttons (optional)
     await loadSavedAudioDefs();
@@ -594,9 +644,10 @@
     }
   });
 
-  $("savePhraseBtn").addEventListener('click', async () => {
-    const label = ($("phraseLabel").value || '').trim();
-    const text = ($("text").value || '').trim();
+  const savePhraseBtn = $("savePhraseBtn");
+  if (savePhraseBtn) savePhraseBtn.addEventListener('click', async () => {
+    const label = ($("phraseLabel")?.value || '').trim();
+    const text = ($("text")?.value || '').trim();
     if (!label) { setPhraseStatus('Label is required.'); return; }
     if (!text) { setPhraseStatus('Text is required.'); return; }
     try {
@@ -614,13 +665,14 @@
     }
   });
 
-  $("deletePhraseBtn").addEventListener('click', async () => {
+  const deletePhraseBtn = $("deletePhraseBtn");
+  if (deletePhraseBtn) deletePhraseBtn.addEventListener('click', async () => {
     if (!selectedPhraseId) return;
     try {
       setPhraseStatus('Deleting…');
       await api('/ui/phrases/delete', 'POST', { id: selectedPhraseId });
       setSelectedPhrase('');
-      $("phraseLabel").value = '';
+      if ($("phraseLabel")) $("phraseLabel").value = '';
       setPhraseStatus('Deleted.');
       const phrases = await loadPhrases();
       renderPhrases(phrases);
@@ -655,22 +707,23 @@
 
   // --- Saved Audio Playback: play previously generated audio on the selected device ---
   document.addEventListener('click', async (ev) => {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('button.savedAudioPlay') : null;
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button.savedAudioPlay,button.freqAudioPlay') : null;
     if (!btn) return;
 
     const key = btn.getAttribute('data-key') || '';
+    const isFreq = btn.classList.contains('freqAudioPlay') || isFreqKey(key);
     const device_id = $("device").value || '';
     if (!device_id) { log('Pick a device first.'); return; }
     if (!key) { log('Missing saved-audio key.'); return; }
 
     try {
       btn.disabled = true;
-      setSavedAudioPlayStatus(`Playing: ${saLabel(key)}…`);
+      (isFreq ? setFreqAudioPlayStatus : setSavedAudioPlayStatus)(`Playing: ${isFreq ? `#${key.replace('freq_','')}` : saLabel(key)}…`);
       log(`SavedAudio play: device=${device_id}, key=${key}`);
 
       const r = await api('/ui/saved-audio/play', 'POST', { device_id, key });
       log(`SavedAudio play queued: ${JSON.stringify(r)}`);
-      setSavedAudioPlayStatus(`Sent: ${saLabel(key)}`);
+      (isFreq ? setFreqAudioPlayStatus : setSavedAudioPlayStatus)(`Sent.`);
 
       // Optionally poll for ACK if a command_id is returned
       if (r && r.command_id) {
@@ -678,33 +731,35 @@
           log(`SavedAudio ACK: ${JSON.stringify(a)}`);
         });
         if (ack && String(ack.status || '').toLowerCase() === 'completed') {
-          setSavedAudioPlayStatus(`Completed: ${saLabel(key)}`);
+          (isFreq ? setFreqAudioPlayStatus : setSavedAudioPlayStatus)(`Completed.`);
         }
       }
     } catch(e) {
-      setSavedAudioPlayStatus(`Play failed: ${e.message}`);
+      (isFreq ? setFreqAudioPlayStatus : setSavedAudioPlayStatus)(`Play failed: ${e.message}`);
       log(`SavedAudio play failed: ${e.message}`);
     } finally {
       btn.disabled = false;
-      setTimeout(() => setSavedAudioPlayStatus(''), 1200);
+      setTimeout(() => (isFreq ? setFreqAudioPlayStatus : setSavedAudioPlayStatus)(''), 1200);
     }
   });
 
   // --- Saved Audio Generation: generate/store audio on hub for later playback ---
   document.addEventListener('click', async (ev) => {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('button.savedAudioGen') : null;
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button.savedAudioGen,button.freqAudioGen') : null;
     if (!btn) return;
 
     const key = btn.getAttribute('data-key') || '';
+    const isFreq = btn.classList.contains('freqAudioGen') || isFreqKey(key);
     const device_id = $("device").value || '';
     const voice_id = $("voice").value || '';
     const speed = getCurrentSpeed();
     let inp = null;
+    const cls = isFreq ? 'freqAudioText' : 'savedAudioText';
     try {
-      inp = document.querySelector(`input.savedAudioText[data-key="${(window.CSS && CSS.escape) ? CSS.escape(key) : key}"]`);
+      inp = document.querySelector(`input.${cls}[data-key="${(window.CSS && CSS.escape) ? CSS.escape(key) : key}"]`);
     } catch(e) {
       // Fallback: find by iterating
-      document.querySelectorAll('input.savedAudioText').forEach(x => {
+      document.querySelectorAll(`input.${cls}`).forEach(x => {
         if (!inp && (x.getAttribute('data-key') || '') === key) inp = x;
       });
     }
@@ -713,25 +768,25 @@
     if (!device_id) { log('Pick a device first.'); return; }
     if (!voice_id) { log('Pick a voice first.'); return; }
     if (!key) { log('Missing saved-audio key.'); return; }
-    if (!text) { setSavedAudioGenStatus('Text is required.'); return; }
+    if (!text) { (isFreq ? setFreqAudioGenStatus : setSavedAudioGenStatus)('Text is required.'); return; }
 
     try {
       btn.disabled = true;
-      setSavedAudioGenStatus(`Generating: ${saLabel(key)}…`);
+      (isFreq ? setFreqAudioGenStatus : setSavedAudioGenStatus)(`Generating…`);
       log(`SavedAudio generate: device=${device_id}, voice=${voice_id}, key=${key}, chars=${text.length}`);
 
       const r = await api('/ui/saved-audio/generate', 'POST', { device_id, key, text, tts: { voice_id, speed } });
       log(`SavedAudio generated: ${JSON.stringify(r)}`);
-      setSavedAudioGenStatus(`Saved: ${saLabel(key)}`);
+      (isFreq ? setFreqAudioGenStatus : setSavedAudioGenStatus)(`Saved.`);
 
       // Refresh saved-audio availability (if endpoint exists)
       await loadSavedAudioDefs();
     } catch(e) {
-      setSavedAudioGenStatus(`Generate failed: ${e.message}`);
+      (isFreq ? setFreqAudioGenStatus : setSavedAudioGenStatus)(`Generate failed: ${e.message}`);
       log(`SavedAudio generate failed: ${e.message}`);
     } finally {
       btn.disabled = false;
-      setTimeout(() => setSavedAudioGenStatus(''), 1400);
+      setTimeout(() => (isFreq ? setFreqAudioGenStatus : setSavedAudioGenStatus)(''), 1400);
     }
   });
 
