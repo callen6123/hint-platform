@@ -1,76 +1,47 @@
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <title>Available Voices</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/css/hub.css" />
   <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      margin: 24px;
-      background: #111;
-      color: #eee;
-    }
-    h1 {
-      margin-bottom: 16px;
-    }
-    .muted {
-      color: #aaa;
-      font-size: 13px;
-    }
     .voice-list {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
       margin-top: 18px;
     }
     .voice-card {
-      background: #1b1b1b;
-      border: 1px solid #2a2a2a;
+      border: 1px solid rgba(0,0,0,0.12);
       border-radius: 8px;
       padding: 14px;
+    }
+    .voice-header {
       display: flex;
-      flex-direction: column;
-      gap: 8px;
+      gap: 10px;
+      align-items: baseline;
+      flex-wrap: wrap;
     }
     .voice-name {
       font-weight: 600;
-      font-size: 15px;
     }
     .voice-meta {
+      opacity: 0.8;
       font-size: 12px;
-      color: #aaa;
     }
     .row {
       display: flex;
       gap: 8px;
       align-items: center;
       flex-wrap: wrap;
-    }
-    button {
-      background: #2c6bed;
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      padding: 6px 10px;
-      cursor: pointer;
-      font-size: 13px;
-    }
-    button:disabled {
-      background: #444;
-      cursor: not-allowed;
+      margin-top: 10px;
     }
     .topbar {
       display: flex;
       justify-content: space-between;
       align-items: center;
-    }
-    .topbar a {
-      color: #6aa9ff;
-      text-decoration: none;
-      font-size: 13px;
+      gap: 10px;
     }
   </style>
 </head>
@@ -82,7 +53,7 @@
   </div>
 
   <div class="muted">
-    Preview available ElevenLabs voices. Click "Play Demo" to hear the built‑in preview.
+    Preview available voices. Click "Play Demo" to hear the built‑in preview.
   </div>
 
   <div id="voiceList" class="voice-list"></div>
@@ -103,10 +74,13 @@
       const card = document.createElement('div');
       card.className = 'voice-card';
 
+      const header = document.createElement('div');
+      header.className = 'voice-header';
+
       const name = document.createElement('div');
       name.className = 'voice-name';
       name.textContent = v.name || '(Unnamed Voice)';
-      card.appendChild(name);
+      header.appendChild(name);
 
       const meta = document.createElement('div');
       meta.className = 'voice-meta';
@@ -115,17 +89,20 @@
         (v.labels && v.labels.accent) ? `Accent: ${v.labels.accent}` : '',
         (v.labels && v.labels.gender) ? `Gender: ${v.labels.gender}` : ''
       ].filter(Boolean).join(' • ');
-      card.appendChild(meta);
+      header.appendChild(meta);
+
+      card.appendChild(header);
 
       const row = document.createElement('div');
       row.className = 'row';
 
       const btn = document.createElement('button');
+      btn.className = 'primary';
       btn.textContent = 'Play Demo';
 
       if (!v.preview_url) {
         btn.disabled = true;
-        btn.textContent = 'No Preview';
+        btn.title = 'No preview available for this voice.';
       } else {
         btn.addEventListener('click', () => {
           player.src = v.preview_url;
