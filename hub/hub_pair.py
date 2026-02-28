@@ -478,6 +478,7 @@ def _get_elevenlabs_voices_cached(force: bool = False) -> dict:
                     "name": name,
                     "category": v.get("category"),
                     "labels": v.get("labels") if isinstance(v.get("labels"), dict) else {},
+                    "preview_url": (str(v.get("preview_url") or "").strip() or None),
                 })
 
         # Sort by name for UI
