@@ -228,6 +228,60 @@
     if (delBtn) delBtn.disabled = !selectedPhraseId;
   }
 
+  // --- Saved Audio (common phrases) ---
+  const SAVED_AUDIO_LABELS = {
+    intro_welcome: 'Intro/Welcome',
+    outro_win: 'Outro/Win',
+    outro_lose: 'Outro/Lose',
+    time_30: 'Time: 30 min',
+    time_15: 'Time: 15 min',
+    time_5: 'Time: 5 min',
+  };
+
+  function saLabel(key){
+    return SAVED_AUDIO_LABELS[key] || key || 'Saved Audio';
+  }
+
+  function setSavedAudioGenStatus(s){
+    const el = $("savedAudioGenStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
+  function setSavedAudioPlayStatus(s){
+    const el = $("savedAudioPlayStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
+  async function loadSavedAudioDefs(){
+    // Optional endpoint; if not implemented yet, silently ignore.
+    try {
+      const data = await api('/ui/saved-audio/list', 'GET');
+      const items = (data && data.items) ? data.items : {};
+
+      document.querySelectorAll('input.savedAudioText').forEach(inp => {
+        const key = inp.getAttribute('data-key') || '';
+        const it = items[key] || null;
+        if (it && typeof it.text === 'string' && !inp.value) {
+          inp.value = it.text;
+        }
+      });
+
+      document.querySelectorAll('button.savedAudioPlay').forEach(btn => {
+        const key = btn.getAttribute('data-key') || '';
+        const it = items[key] || null;
+        // If endpoint reports existence, disable play when missing.
+        if (it && typeof it.exists === 'boolean') {
+          btn.disabled = !it.exists;
+          btn.title = it.exists ? 'Play saved audio' : 'No saved audio yet (generate first)';
+        }
+      });
+    } catch(e) {
+      // Endpoint not present yet; leave UI enabled.
+    }
+  }
+
   function savePrefs(){
     try {
       localStorage.setItem('hint_voice_id', $("voice").value || '');
@@ -358,6 +412,9 @@
     renderPhrases(phrases);
     setSelectedPhrase('');
     setPhraseStatus('');
+
+    // Prefill Saved Audio inputs / enable play buttons (optional)
+    await loadSavedAudioDefs();
   }
 
   $("device").addEventListener('change', () => {
@@ -595,6 +652,88 @@
     textArea.addEventListener('input', updateCharCount);
     updateCharCount();
   }
+
+  // --- Saved Audio Playback: play previously generated audio on the selected device ---
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button.savedAudioPlay') : null;
+    if (!btn) return;
+
+    const key = btn.getAttribute('data-key') || '';
+    const device_id = $("device").value || '';
+    if (!device_id) { log('Pick a device first.'); return; }
+    if (!key) { log('Missing saved-audio key.'); return; }
+
+    try {
+      btn.disabled = true;
+      setSavedAudioPlayStatus(`Playing: ${saLabel(key)}…`);
+      log(`SavedAudio play: device=${device_id}, key=${key}`);
+
+      const r = await api('/ui/saved-audio/play', 'POST', { device_id, key });
+      log(`SavedAudio play queued: ${JSON.stringify(r)}`);
+      setSavedAudioPlayStatus(`Sent: ${saLabel(key)}`);
+
+      // Optionally poll for ACK if a command_id is returned
+      if (r && r.command_id) {
+        const ack = await waitForAck(device_id, r.command_id, 30000, (a) => {
+          log(`SavedAudio ACK: ${JSON.stringify(a)}`);
+        });
+        if (ack && String(ack.status || '').toLowerCase() === 'completed') {
+          setSavedAudioPlayStatus(`Completed: ${saLabel(key)}`);
+        }
+      }
+    } catch(e) {
+      setSavedAudioPlayStatus(`Play failed: ${e.message}`);
+      log(`SavedAudio play failed: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => setSavedAudioPlayStatus(''), 1200);
+    }
+  });
+
+  // --- Saved Audio Generation: generate/store audio on hub for later playback ---
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button.savedAudioGen') : null;
+    if (!btn) return;
+
+    const key = btn.getAttribute('data-key') || '';
+    const device_id = $("device").value || '';
+    const voice_id = $("voice").value || '';
+    const speed = getCurrentSpeed();
+    let inp = null;
+    try {
+      inp = document.querySelector(`input.savedAudioText[data-key="${(window.CSS && CSS.escape) ? CSS.escape(key) : key}"]`);
+    } catch(e) {
+      // Fallback: find by iterating
+      document.querySelectorAll('input.savedAudioText').forEach(x => {
+        if (!inp && (x.getAttribute('data-key') || '') === key) inp = x;
+      });
+    }
+    const text = (inp && inp.value) ? String(inp.value).trim() : '';
+
+    if (!device_id) { log('Pick a device first.'); return; }
+    if (!voice_id) { log('Pick a voice first.'); return; }
+    if (!key) { log('Missing saved-audio key.'); return; }
+    if (!text) { setSavedAudioGenStatus('Text is required.'); return; }
+
+    try {
+      btn.disabled = true;
+      setSavedAudioGenStatus(`Generating: ${saLabel(key)}…`);
+      log(`SavedAudio generate: device=${device_id}, voice=${voice_id}, key=${key}, chars=${text.length}`);
+
+      const r = await api('/ui/saved-audio/generate', 'POST', { device_id, key, text, tts: { voice_id, speed } });
+      log(`SavedAudio generated: ${JSON.stringify(r)}`);
+      setSavedAudioGenStatus(`Saved: ${saLabel(key)}`);
+
+      // Refresh saved-audio availability (if endpoint exists)
+      await loadSavedAudioDefs();
+    } catch(e) {
+      setSavedAudioGenStatus(`Generate failed: ${e.message}`);
+      log(`SavedAudio generate failed: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => setSavedAudioGenStatus(''), 1400);
+    }
+  });
 
   refreshAll(false).catch(e => log(`Init failed: ${e.message}`));
 })();

@@ -13,6 +13,7 @@ from flask import Blueprint, Response, abort, jsonify, request, send_file
 
  # Allow override via environment variable (set by systemd)
 AUDIO_DIR = Path(os.environ.get("HINT_AUDIO_CACHE_DIR", "/opt/hint/audio_cache"))
+PINNED_DIR = Path(os.environ.get("HINT_AUDIO_PINNED_DIR", "/var/lib/hint/audio_pinned"))
 DEVICES_DB = Path("/var/lib/hint/devices.json")
 
 
@@ -110,12 +111,13 @@ class AudioStore:
 
 
 bp = Blueprint("audio", __name__)
-_store = AudioStore()
+_store_cache = AudioStore(AUDIO_DIR)
+_store_pinned = AudioStore(PINNED_DIR)
 
 
 @bp.get("/audio/health")
 def audio_health():
-    return jsonify({"ok": True, "audio_dir": str(AUDIO_DIR)})
+    return jsonify({"ok": True, "audio_dir": str(AUDIO_DIR), "pinned_dir": str(PINNED_DIR)})
 
 
 @bp.get("/audio/file/<audio_id>")
@@ -140,7 +142,9 @@ def audio_file(audio_id: str):
 
     _auth_device_or_403(device_id, token)
 
-    p = _store.get_path(audio_id)
+    p = _store_pinned.get_path(audio_id)
+    if not p:
+        p = _store_cache.get_path(audio_id)
     if not p:
         abort(404)
 
@@ -156,11 +160,16 @@ def build_audio_url(base_url: str, *, audio_id: str, device_id: str, token: str)
     return f"{base}/audio/file/{audio_id}?device_id={device_id}&token={token}"
 
 
-def store_audio(audio: bytes, ext: str, *, prefix: str = "tts") -> StoredAudio:
-    """Store audio bytes and return StoredAudio metadata."""
-    return _store.put(audio, ext, prefix=prefix)
+def store_audio(audio: bytes, ext: str, *, prefix: str = "tts", pinned: bool = False) -> StoredAudio:
+    """Store audio bytes and return StoredAudio metadata.
+
+    If pinned=True, audio is written to PINNED_DIR (not subject to cache cleanup).
+    """
+    store = _store_pinned if pinned else _store_cache
+    return store.put(audio, ext, prefix=prefix)
 
 
 def ensure_audio_dir():
-    """Ensure the audio cache directory exists."""
+    """Ensure the audio cache and pinned directories exist."""
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    PINNED_DIR.mkdir(parents=True, exist_ok=True)

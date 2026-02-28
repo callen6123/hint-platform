@@ -108,6 +108,25 @@ REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
 UI_USERS_PATH = REGISTRY_DIR / "ui_users.json"
+# Pinned audio directory (not subject to cache cleanup). Must match audio_server.py.
+PINNED_AUDIO_DIR = Path(os.environ.get("HINT_AUDIO_PINNED_DIR", "/var/lib/hint/audio_pinned"))
+
+def _delete_pinned_audio_file(audio_id: str, ext: str | None = None) -> bool:
+    """Best-effort delete of a pinned audio file by id/ext."""
+    try:
+        aid = str(audio_id or "").strip()
+        if not aid:
+            return False
+        ex = str(ext or "mp3").strip().lstrip(".")
+        if not ex or any(ch in ex for ch in ("/", "\\", " ")):
+            ex = "mp3"
+        p = (PINNED_AUDIO_DIR / f"{aid}.{ex}")
+        if p.exists() and p.is_file():
+            p.unlink()
+            return True
+    except Exception:
+        return False
+    return False
 
 # --- Hub audit log (append-only JSONL) ---
 HUB_LOG_DIR = Path("/var/lib/hint/logs")
@@ -739,6 +758,8 @@ def read_ui_config() -> dict:
         d["devices"] = {}
     if not isinstance(d.get("phrases"), list):
         d["phrases"] = []
+    if not isinstance(d.get("saved_audio"), dict):
+        d["saved_audio"] = {}
     return d
 
 
@@ -751,6 +772,8 @@ def write_ui_config(cfg: dict) -> None:
         cfg["devices"] = {}
     if not isinstance(cfg.get("phrases"), list):
         cfg["phrases"] = []
+    if not isinstance(cfg.get("saved_audio"), dict):
+        cfg["saved_audio"] = {}
 
     _atomic_write_json(UI_CONFIG_PATH, cfg)
 
@@ -762,6 +785,48 @@ def get_device_ui_cfg(device_id: str) -> dict:
         return {}
     v = devs.get(device_id)
     return v if isinstance(v, dict) else {}
+
+
+# --- Saved audio config helpers ---
+
+def _get_saved_audio_cfg() -> dict:
+    cfg = read_ui_config()
+    sa = cfg.get("saved_audio") if isinstance(cfg, dict) else None
+    if not isinstance(sa, dict):
+        return {}
+    return sa
+
+
+def _set_saved_audio_item(key: str, item: dict) -> dict:
+    """Upsert a saved-audio item in ui_config and return the stored item."""
+    key = sanitize_topic_id(str(key or ""))
+    if not key:
+        return {}
+
+    cfg = read_ui_config()
+    sa = cfg.get("saved_audio")
+    if not isinstance(sa, dict):
+        sa = {}
+        cfg["saved_audio"] = sa
+
+    # Keep only known fields
+    out = {}
+    if isinstance(item, dict):
+        if "text" in item and item.get("text") is not None:
+            out["text"] = str(item.get("text") or "").strip()[:2000]
+        if "audio_id" in item and item.get("audio_id") is not None:
+            out["audio_id"] = str(item.get("audio_id") or "").strip()[:256]
+        if "ext" in item and item.get("ext") is not None:
+            out["ext"] = str(item.get("ext") or "").strip().lstrip(".")[:16]
+        if "updated_at" in item and item.get("updated_at") is not None:
+            out["updated_at"] = str(item.get("updated_at") or "").strip()[:64]
+
+    if "updated_at" not in out:
+        out["updated_at"] = utc_now_iso()
+
+    sa[key] = out
+    write_ui_config(cfg)
+    return out
 
 
 # --- UI users/auth storage ---
@@ -2360,6 +2425,278 @@ def ui_beep():
 @app.post("/ui/device/speaker-test")
 def ui_speaker_test():
     return ui_beep()
+
+
+# --- UI Saved Audio endpoints (common phrases) ---
+
+@app.get("/ui/saved-audio/list")
+def ui_saved_audio_list():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    sa = _get_saved_audio_cfg()
+    items = {}
+
+    # Return a stable, sanitized mapping
+    for k, v in (sa or {}).items():
+        key = sanitize_topic_id(str(k or ""))
+        if not key or not isinstance(v, dict):
+            continue
+        textv = str(v.get("text") or "").strip()
+        audio_id = str(v.get("audio_id") or "").strip()
+        ext = str(v.get("ext") or "").strip().lstrip(".")
+        items[key] = {
+            "text": textv,
+            "audio_id": audio_id,
+            "ext": ext,
+            "exists": bool(audio_id),
+            "updated_at": v.get("updated_at"),
+        }
+
+    return jsonify({"ok": True, "items": items})
+
+
+@app.post("/ui/saved-audio/generate")
+def ui_saved_audio_generate():
+    """Generate TTS on the hub and store it under a stable key for later playback.
+
+    Body:
+      {"device_id": "..." (optional), "key": "...", "text": "...", "tts": {"voice_id":"...", "speed":1.0}}
+
+    Returns:
+      {"ok": True, "key": "...", "audio_id": "...", "ext": "mp3"}
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    key = sanitize_topic_id(str(body.get("key") or ""))
+    text = str(body.get("text") or "").strip()
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+
+    if not key:
+        return jsonify({"ok": False, "error": "key_required"}), 400
+    if not text:
+        return jsonify({"ok": False, "error": "text_required"}), 400
+
+    if tts is None or not hasattr(tts, "synthesize"):
+        return jsonify({"ok": False, "error": "tts_not_configured"}), 500
+    if store_audio is None or build_audio_url is None:
+        return jsonify({"ok": False, "error": "audio_server_not_configured"}), 500
+
+    # Optional TTS options
+    tts_opts = body.get("tts") if isinstance(body.get("tts"), dict) else {}
+    if not isinstance(tts_opts, dict):
+        tts_opts = {}
+
+    # Clamp speed 0.7..1.2 if provided
+    if "speed" in tts_opts and tts_opts.get("speed") is not None:
+        try:
+            sp = float(tts_opts.get("speed"))
+        except Exception:
+            return jsonify({"ok": False, "error": "speed_invalid"}), 400
+        sp = max(0.7, min(1.2, sp))
+        tts_opts["speed"] = sp
+
+    # If voice_id not provided, use per-device default then env
+    if not str(tts_opts.get("voice_id") or "").strip():
+        default_voice_id = ""
+        if device_id:
+            ui_dev_cfg = get_device_ui_cfg(device_id)
+            default_voice_id = str(ui_dev_cfg.get("default_voice_id") or "").strip()
+        if not default_voice_id:
+            default_voice_id = (
+                os.environ.get("ELEVENLABS_VOICE_ID")
+                or os.environ.get("ELEVENLABS_DEFAULT_VOICE_ID")
+                or ""
+            ).strip()
+        if default_voice_id:
+            tts_opts["voice_id"] = default_voice_id
+        else:
+            return jsonify({"ok": False, "error": "voice_id_required"}), 400
+
+    # Synthesize
+    try:
+        res = tts.synthesize(text=text, **tts_opts)
+
+        audio_bytes = None
+        ext = None
+
+        if isinstance(res, tuple) and len(res) >= 1:
+            audio_bytes = res[0]
+            if len(res) >= 2:
+                ext = res[1]
+        elif isinstance(res, dict):
+            audio_bytes = res.get("audio_bytes") or res.get("audio") or res.get("bytes")
+            ext = res.get("ext") or res.get("format") or res.get("mime")
+        else:
+            for a in ("audio_bytes", "audio", "bytes"):
+                if hasattr(res, a):
+                    audio_bytes = getattr(res, a)
+                    break
+            for a in ("ext", "format", "mime"):
+                if hasattr(res, a):
+                    ext = getattr(res, a)
+                    break
+
+    except TypeError as e:
+        msg = str(e)
+        if "voice_id" in msg:
+            return jsonify({"ok": False, "error": "voice_id_required", "detail": msg}), 400
+        return jsonify({"ok": False, "error": "tts_type_error", "detail": msg}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"tts_failed:{e}"}), 500
+
+    if isinstance(audio_bytes, memoryview):
+        audio_bytes = audio_bytes.tobytes()
+
+    if not isinstance(audio_bytes, (bytes, bytearray)) or len(audio_bytes) == 0:
+        return jsonify({"ok": False, "error": "tts_empty_audio"}), 500
+
+    ext = str(ext or "mp3").strip().lstrip(".")
+    if not ext or any(ch in ext for ch in ("/", "\\", " ")):
+        ext = "mp3"
+
+    # If this key already exists, delete the previous pinned file so we don't accumulate.
+    try:
+        prev = _get_saved_audio_cfg().get(key)
+        if isinstance(prev, dict):
+            prev_audio_id = str(prev.get("audio_id") or "").strip()
+            prev_ext = str(prev.get("ext") or "").strip().lstrip(".")
+            if prev_audio_id:
+                _delete_pinned_audio_file(prev_audio_id, prev_ext or ext)
+    except Exception:
+        pass
+
+    # Store audio as PINNED so it is not removed by cache cleanup.
+    try:
+        stored = store_audio(bytes(audio_bytes), ext=ext, pinned=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"audio_store_failed:{e}"}), 500
+
+    _cleanup_audio_cache_if_needed()
+
+    audio_id = None
+    if isinstance(stored, str):
+        audio_id = stored
+    elif isinstance(stored, (tuple, list)) and stored:
+        audio_id = stored[0]
+    elif isinstance(stored, dict):
+        audio_id = stored.get("audio_id") or stored.get("id")
+    else:
+        for a in ("audio_id", "id"):
+            if hasattr(stored, a):
+                audio_id = getattr(stored, a)
+                break
+
+    audio_id = str(audio_id or "").strip()
+    if not audio_id:
+        return jsonify({"ok": False, "error": "audio_store_failed:missing_audio_id"}), 500
+
+    # Persist mapping in ui_config
+    item = _set_saved_audio_item(key, {"text": text, "audio_id": audio_id, "ext": ext, "updated_at": utc_now_iso()})
+
+    _append_hub_cmd_log({
+        "event": "saved_audio_generated",
+        "key": key,
+        "device_id": device_id,
+        "audio_id": audio_id,
+        "ext": ext,
+    })
+
+    return jsonify({"ok": True, "key": key, "audio_id": audio_id, "ext": ext, "item": item})
+
+
+@app.post("/ui/saved-audio/play")
+def ui_saved_audio_play():
+    """Command a device to play a previously generated saved-audio clip.
+
+    Body:
+      {"device_id": "...", "key": "...", "command_id": "optional", "ttl_sec": 300, "priority": 6}
+
+    Publishes a device command with params {url: <hub audio url>}.
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    key = sanitize_topic_id(str(body.get("key") or ""))
+
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+    if not key:
+        return jsonify({"ok": False, "error": "key_required"}), 400
+
+    if store_audio is None or build_audio_url is None:
+        return jsonify({"ok": False, "error": "audio_server_not_configured"}), 500
+
+    # Lookup mapping
+    sa = _get_saved_audio_cfg()
+    item = sa.get(key) if isinstance(sa, dict) else None
+    if not isinstance(item, dict):
+        return jsonify({"ok": False, "error": "unknown_key"}), 404
+
+    audio_id = str(item.get("audio_id") or "").strip()
+    if not audio_id:
+        return jsonify({"ok": False, "error": "audio_missing_for_key"}), 404
+
+    # Device registry
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    ota_token = str(rec.get("ota_token") or "")
+    if not ota_token:
+        return jsonify({"ok": False, "error": "missing_ota_token"}), 500
+
+    # Build a device-authenticated audio URL
+    try:
+        url = build_audio_url(
+            base_url=HUB_BASE_URL,
+            audio_id=audio_id,
+            device_id=device_id,
+            token=ota_token,
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"audio_url_failed:{e}"}), 500
+
+    command_id = sanitize_topic_id(body.get("command_id") or f"sa-{key}-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    # NOTE: Device agent should support cmd="play_url" with params {"url": ...}
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="play_url",
+        params={"url": url, "key": key},
+        ttl_sec=ttl_sec if ttl_sec is not None else 300,
+        priority=priority if priority is not None else 6,
+    )
+
+    _append_hub_cmd_log({
+        "event": "saved_audio_play_requested",
+        "site_id": str(site_id),
+        "device_id": str(device_id),
+        "command_id": str(command_id),
+        "key": str(key),
+    })
+
+    try:
+        publish_command(site_id, device_id, payload)
+        _mark_sent_in_registry(reg, device_id, command_id, "play_url")
+        write_registry(reg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({"ok": True, "device_id": device_id, "key": key, "command_id": command_id, "url": url})
 
 # --- UI TTS speak endpoint ---
 
