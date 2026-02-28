@@ -6,6 +6,13 @@
   // Cached device list from /ui/status for UI controls
   let _devicesCache = [];
 
+  // Device Settings panel (bottom of dashboard; same ids as speak page)
+  const deviceSel = $("device");
+  const friendlyNameInput = $("friendlyName");
+  const saveDeviceCfgBtn = $("saveDeviceCfgBtn");
+  const devCfgStatus = $("devCfgStatus");
+  const deviceHint = $("deviceHint");
+
   // Device Actions controls (optional; only present if dashboard.html includes them)
   const actionDeviceSelect = $("actionDeviceSelect");
   const beepBtn = $("beepBtn");
@@ -378,6 +385,75 @@ async function loadAudioStatus(){
     statusTbody.innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">No devices.</td></tr>';
   }
 
+  function setDevCfgStatus(s){
+    if (!devCfgStatus) return;
+    devCfgStatus.textContent = s || '';
+  }
+
+  function syncFriendlyNameFromSelection(){
+    if (!deviceSel) return;
+    const did = String(deviceSel.value || '').trim();
+    const d = _devicesCache.find(x => String((x && x.device_id) || '') === did) || null;
+
+    if (friendlyNameInput) {
+      friendlyNameInput.value = (d && d.friendly_name) ? String(d.friendly_name) : '';
+    }
+
+    if (deviceHint) {
+      deviceHint.textContent = did ? `Device ID: ${did}` : '';
+    }
+  }
+
+  function populateDeviceSettingsPanel(devices){
+    if (!deviceSel) return;
+
+    const list = Array.isArray(devices) ? devices.slice() : [];
+    const prev = String(deviceSel.value || '');
+
+    deviceSel.innerHTML = '';
+
+    if (!list.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No devices';
+      deviceSel.appendChild(opt);
+      deviceSel.disabled = true;
+      if (friendlyNameInput) friendlyNameInput.value = '';
+      if (deviceHint) deviceHint.textContent = 'No devices paired yet.';
+      if (saveDeviceCfgBtn) saveDeviceCfgBtn.disabled = true;
+      return;
+    }
+
+    // Sort by friendly name then device_id
+    list.sort((a,b) => {
+      const an = String((a && (a.friendly_name || a.device_id)) || '');
+      const bn = String((b && (b.friendly_name || b.device_id)) || '');
+      return an.localeCompare(bn);
+    });
+
+    for (const d of list) {
+      const did = String((d && d.device_id) || '');
+      if (!did) continue;
+      const fn = d && d.friendly_name ? String(d.friendly_name).trim() : '';
+      const st = normStatus(d);
+
+      const opt = document.createElement('option');
+      opt.value = did;
+      opt.textContent = fn ? `${fn} — ${did} (${st})` : `${did} (${st})`;
+      deviceSel.appendChild(opt);
+    }
+
+    deviceSel.disabled = false;
+    if (saveDeviceCfgBtn) saveDeviceCfgBtn.disabled = false;
+
+    // Restore previous selection if still present
+    if (prev && Array.from(deviceSel.options).some(o => o.value === prev)) {
+      deviceSel.value = prev;
+    }
+
+    syncFriendlyNameFromSelection();
+  }
+
   function hubHealthLabel(h){
     h = String(h || '').toLowerCase();
     if (h === 'ok') return 'Hub OK';
@@ -606,6 +682,7 @@ async function loadAudioStatus(){
       const devices = data.devices || [];
       _devicesCache = Array.isArray(devices) ? devices : [];
       populateActionDeviceSelect(_devicesCache);
+      populateDeviceSettingsPanel(_devicesCache);
 
       // Hub health (from /ui/status). If the hub reports an error state,
       // annotate devices so `renderWarnings()` can show it.
@@ -861,6 +938,33 @@ async function loadAudioStatus(){
 
   const refreshBtn = $("refresh");
   if (refreshBtn) refreshBtn.addEventListener('click', refresh);
+
+  if (deviceSel) deviceSel.addEventListener('change', () => {
+    syncFriendlyNameFromSelection();
+  });
+
+  if (saveDeviceCfgBtn) saveDeviceCfgBtn.addEventListener('click', async () => {
+    const device_id = deviceSel ? String(deviceSel.value || '').trim() : '';
+    const friendly_name = friendlyNameInput ? String(friendlyNameInput.value || '').trim() : '';
+
+    if (!device_id) {
+      setDevCfgStatus('Pick a device first.');
+      return;
+    }
+
+    try {
+      saveDeviceCfgBtn.disabled = true;
+      setDevCfgStatus('Saving…');
+      await api('/ui/device/config', 'POST', { device_id, friendly_name });
+      setDevCfgStatus('Saved.');
+      await refresh();
+    } catch (e) {
+      setDevCfgStatus(`Save failed: ${e.message}`);
+      log(`Device config save failed: ${e.message}`);
+    } finally {
+      saveDeviceCfgBtn.disabled = false;
+    }
+  });
 
   // Account wiring (optional)
   if (accountBtn) accountBtn.addEventListener('click', async () => {

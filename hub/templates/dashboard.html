@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Type & Tell Dashboard</title>
+  <title>Type & Tell - Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}" />
   <script defer src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </head>
 <body class="dashboard">
   <header>
     <div class="controls">
-      <span class="pill">Type & Tell Dashboard</span>
+      <span class="pill">Type & Tell - Dashboard</span>
       <a href="/speak" id="speakBtn" style="margin-left:10px; text-decoration:none; display:inline-block; padding:8px 12px; border:1px solid rgba(255,255,255,0.18); border-radius:10px; background:rgba(255,255,255,0.06);">SPEAK PAGE</a>
       <!-- <span class="muted">Auto-refresh: 5s</span> -->
     </div>
@@ -163,6 +163,21 @@
         <div><span class="muted">Policy:</span> <span id="audioPolicy"></span></div>
       </div>
       <div class="muted" id="audioErr" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="panel" id="deviceCfgPanel">
+      <h3>Device Settings</h3>
+      <div class="controls" style="flex-wrap:wrap; gap:10px;">
+        <label>Device
+          <select id="device"></select>
+        </label>
+        <label>Friendly name
+          <input id="friendlyName" type="text" placeholder="Device name (optional)" style="min-width:260px;" />
+        </label>
+        <button id="saveDeviceCfgBtn">Save device settings</button>
+        <span class="muted small" id="devCfgStatus"></span>
+      </div>
+      <div class="muted small" id="deviceHint" style="margin-top:6px;"></div>
     </div>
   </main>
 
