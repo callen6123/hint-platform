@@ -26,8 +26,8 @@
         <div class="muted" id="deviceHint"></div>
       </div>
       <div>
-        <label for="voice">Voice</label>
         <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap;">
+          <label for="voice" style="margin:0; min-width:60px;">Voice</label>
           <select id="voice" style="min-width:220px;"></select>
           <button id="setDefaultVoiceBtn">Set As Default Voice</button>
           <span class="muted small" id="defaultVoiceStatus"></span>
@@ -37,7 +37,7 @@
     </div>
 
     <label for="text">Message</label>
-    <textarea id="text" placeholder="Type what you want the character to say…"></textarea>
+    <textarea id="text" placeholder="Type what you want the character to say…" style="height:140px;"></textarea>
     <div class="help-row">
       <div class="muted"><span id="charCount">0</span> characters</div>
     </div>
