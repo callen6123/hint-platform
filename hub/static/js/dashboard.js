@@ -13,6 +13,10 @@
   const devCfgStatus = $("devCfgStatus");
   const deviceHint = $("deviceHint");
 
+    // Prevent refresh from overwriting while the user is typing
+  let _friendlyNameDirty = false;
+  let _friendlyNameDirtyForDevice = '';
+
   // Device Actions controls (optional; only present if dashboard.html includes them)
   const actionDeviceSelect = $("actionDeviceSelect");
   const beepBtn = $("beepBtn");
@@ -390,10 +394,17 @@ async function loadAudioStatus(){
     devCfgStatus.textContent = s || '';
   }
 
-  function syncFriendlyNameFromSelection(){
+  function syncFriendlyNameFromSelection(force){
     if (!deviceSel) return;
     const did = String(deviceSel.value || '').trim();
     const d = _devicesCache.find(x => String((x && x.device_id) || '') === did) || null;
+
+    // If user is actively editing for this device, don't overwrite.
+    const isEditing = (friendlyNameInput && document.activeElement === friendlyNameInput);
+    if (!force && isEditing && _friendlyNameDirty && _friendlyNameDirtyForDevice === did) {
+      if (deviceHint) deviceHint.textContent = did ? `Device ID: ${did}` : '';
+      return;
+    }
 
     if (friendlyNameInput) {
       friendlyNameInput.value = (d && d.friendly_name) ? String(d.friendly_name) : '';
@@ -451,7 +462,7 @@ async function loadAudioStatus(){
       deviceSel.value = prev;
     }
 
-    syncFriendlyNameFromSelection();
+    syncFriendlyNameFromSelection(false);
   }
 
   function hubHealthLabel(h){
@@ -939,8 +950,17 @@ async function loadAudioStatus(){
   const refreshBtn = $("refresh");
   if (refreshBtn) refreshBtn.addEventListener('click', refresh);
 
+    if (friendlyNameInput) {
+    friendlyNameInput.addEventListener('input', () => {
+      _friendlyNameDirty = true;
+      _friendlyNameDirtyForDevice = deviceSel ? String(deviceSel.value || '').trim() : '';
+    });
+  }
+
   if (deviceSel) deviceSel.addEventListener('change', () => {
-    syncFriendlyNameFromSelection();
+    _friendlyNameDirty = false;
+    _friendlyNameDirtyForDevice = String(deviceSel.value || '').trim();
+    syncFriendlyNameFromSelection(true);
   });
 
   if (saveDeviceCfgBtn) saveDeviceCfgBtn.addEventListener('click', async () => {
@@ -957,6 +977,8 @@ async function loadAudioStatus(){
       setDevCfgStatus('Saving…');
       await api('/ui/device/config', 'POST', { device_id, friendly_name });
       setDevCfgStatus('Saved.');
+      _friendlyNameDirty = false;
+      _friendlyNameDirtyForDevice = device_id;
       await refresh();
     } catch (e) {
       setDevCfgStatus(`Save failed: ${e.message}`);
