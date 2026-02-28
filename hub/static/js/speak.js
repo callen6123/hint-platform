@@ -275,7 +275,8 @@
   });
   $("voice").addEventListener('change', savePrefs);
 
-  $("refreshBtn").addEventListener('click', async () => {
+  const refreshBtn = $("refreshBtn");
+  if (refreshBtn) refreshBtn.addEventListener('click', async () => {
     try {
       await refreshAll(true);
     } catch(e){
