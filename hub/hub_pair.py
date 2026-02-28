@@ -2616,7 +2616,7 @@ def ui_saved_audio_play():
     Body:
       {"device_id": "...", "key": "...", "command_id": "optional", "ttl_sec": 300, "priority": 6}
 
-    Publishes a device command with params {url: <hub audio url>}.
+    Publishes a device command using the same schema as /ui/speak.
     """
     ar = require_ui_auth()
     if ar is not None:
@@ -2672,11 +2672,18 @@ def ui_saved_audio_play():
     ttl_sec = body.get("ttl_sec")
     priority = body.get("priority")
 
-    # NOTE: Device agent should support cmd="play_url" with params {"url": ...}
+    # Reuse the existing device command schema used by /ui/speak.
+    # This ensures the device agent plays the provided URL instead of falling back.
     payload = make_command_payload(
         command_id=command_id,
-        cmd="play_url",
-        params={"url": url, "key": key},
+        cmd="speak",
+        params={
+            "url": url,
+            "audio_id": audio_id,
+            "text": "",  # saved clip
+            "ext": str(item.get("ext") or "mp3").strip().lstrip(".") or "mp3",
+            "saved_key": key,
+        },
         ttl_sec=ttl_sec if ttl_sec is not None else 300,
         priority=priority if priority is not None else 6,
     )
@@ -2691,7 +2698,7 @@ def ui_saved_audio_play():
 
     try:
         publish_command(site_id, device_id, payload)
-        _mark_sent_in_registry(reg, device_id, command_id, "play_url")
+        _mark_sent_in_registry(reg, device_id, command_id, "speak")
         write_registry(reg)
     except Exception as e:
         return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
