@@ -1948,6 +1948,15 @@ def fleet_build_and_update():
 # UI proxy endpoints (same-origin). No API key required from the browser.
 
 
+# --- UI Voices Page ---
+@app.get("/voices")
+def ui_voices_page():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    return render_template("voices.html")
+
 @app.get("/ui/voices")
 def ui_voices():
     ar = require_ui_auth()
