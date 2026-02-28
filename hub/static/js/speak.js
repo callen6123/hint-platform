@@ -81,7 +81,9 @@
   }
 
   function setStatus(s){
-    $("status").textContent = s || '';
+    const el = $("status");
+    if (!el) return;
+    el.textContent = s || '';
   }
 
   function updateCharCount(){
@@ -127,7 +129,9 @@
   }
 
   function setDevCfgStatus(s){
-    $("devCfgStatus").textContent = s || '';
+    const el = $("devCfgStatus");
+    if (!el) return;
+    el.textContent = s || '';
   }
   function setPhraseStatus(s){
     $("phraseStatus").textContent = s || '';
@@ -245,10 +249,13 @@
     if (prefs.voice_id) {
       $("voice").value = prefs.voice_id;
     }
-    // Set friendlyName input for selected device
-    const curDid = $("device").value || '';
-    const curDev = cachedDevices.find(x => (x.device_id||'') === curDid);
-    $("friendlyName").value = (curDev && curDev.friendly_name) ? String(curDev.friendly_name) : '';
+    // Set friendlyName input for selected device (if present in the page)
+    const fnEl = $("friendlyName");
+    if (fnEl) {
+      const curDid = $("device").value || '';
+      const curDev = cachedDevices.find(x => (x.device_id||'') === curDid);
+      fnEl.value = (curDev && curDev.friendly_name) ? String(curDev.friendly_name) : '';
+    }
 
     // If pref not present or invalid, just keep first option.
     savePrefs();
@@ -436,9 +443,10 @@
     }
   });
 
-  $("saveDeviceCfgBtn").addEventListener('click', async () => {
+  const saveDevBtn = $("saveDeviceCfgBtn");
+  if (saveDevBtn) saveDevBtn.addEventListener('click', async () => {
     const device_id = $("device").value || '';
-    const friendly_name = ($("friendlyName").value || '').trim();
+    const friendly_name = (document.getElementById('friendlyName')?.value || '').trim();
     const default_voice_id = $("voice").value || '';
     if (!device_id) { setDevCfgStatus('Pick a device first.'); return; }
     try {
