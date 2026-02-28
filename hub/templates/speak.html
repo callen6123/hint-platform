@@ -13,7 +13,7 @@
       <span class="pill">Type & Tell</span>
       <!-- <nav> -->
         <!-- <a href="/speak"><b>Speak</b></a> -->
-        <a href="/dashboard">DASHBOARD</a>
+        <a href="/dashboard" style="margin-left:10px; padding:8px 12px;">DASHBOARD</a>
       <!-- </nav> -->
     </div>
   </header>
@@ -32,11 +32,11 @@
       </div>
     </div>
 
-    <div class="row" style="margin-top:10px;">
+    <!-- <div class="row" style="margin-top:10px;">
       <input id="friendlyName" type="text" placeholder="Device name (optional)" />
       <button id="saveDeviceCfgBtn">Save device settings</button>
       <span class="muted small" id="devCfgStatus"></span>
-    </div>
+    </div> -->
 
     <label for="text">Message</label>
     <textarea id="text" placeholder="Type what you want the character to say…"></textarea>
@@ -47,14 +47,14 @@
     <div class="row" style="margin-top:10px;">
       <button id="speakBtn">Generate + Play</button>
 
-      <label class="small" style="margin:0;">
+      <!-- <label class="small" style="margin:0;">
         Cancel mode
         <select id="cancelMode" style="max-width:220px; margin-left:6px;">
           <option value="stop" selected>Stop playback</option>
           <option value="clear_queue">Clear queue</option>
           <option value="stop_and_clear">Stop + clear queue</option>
         </select>
-      </label>
+      </label> -->
 
       <button id="cancelBtn" class="danger">Cancel / Stop</button>
       <button id="refreshBtn">Refresh devices/voices</button>
@@ -82,7 +82,7 @@
     </div>
   </div>
 
-  <div class="log" id="log"></div>
+  <!-- <div class="log" id="log"></div> -->
 
   <script defer src="{{ url_for('static', filename='js/speak.js') }}"></script>
 </body>
