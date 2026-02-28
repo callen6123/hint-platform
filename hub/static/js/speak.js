@@ -133,8 +133,55 @@
     if (!el) return;
     el.textContent = s || '';
   }
+
+  function setVolumeStatus(s){
+    const el = $("volumeStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
+  function setVolumeValueUI(v){
+    const out = $("volumeValue");
+    const slider = $("volumeSlider");
+    if (slider && (v === undefined || v === null || Number.isNaN(Number(v)))) {
+      v = Number(slider.value || 0);
+    }
+    const pct = Math.max(0, Math.min(100, Number(v) || 0));
+    if (out) out.textContent = `${pct}%`;
+    if (slider) slider.value = String(pct);
+  }
+
+  async function loadDeviceVolume(device_id){
+    if (!device_id) return;
+    try {
+      const data = await api(`/ui/device/volume?device_id=${encodeURIComponent(device_id)}`, 'GET');
+      if (data && data.volume_percent !== undefined && data.volume_percent !== null) {
+        setVolumeValueUI(Number(data.volume_percent));
+      }
+      setVolumeStatus('');
+    } catch(e){
+      // Non-fatal: leave slider as-is
+      setVolumeStatus('');
+    }
+  }
+
+  async function saveDeviceVolume(device_id, volume_percent){
+    if (!device_id) return;
+    const pct = Math.max(0, Math.min(100, Number(volume_percent) || 0));
+    try {
+      setVolumeStatus('Saving…');
+      await api('/ui/device/volume', 'POST', { device_id, volume_percent: pct });
+      setVolumeStatus('Saved.');
+    } catch(e){
+      setVolumeStatus('Save failed.');
+      log(`Volume save failed: ${e.message}`);
+    }
+  }
+
   function setPhraseStatus(s){
-    $("phraseStatus").textContent = s || '';
+    const el = $("phraseStatus");
+    if (!el) return;
+    el.textContent = s || '';
   }
   function setSelectedPhrase(pid){
     selectedPhraseId = pid || '';
@@ -246,6 +293,10 @@
     if (prefs.device_id) {
       $("device").value = prefs.device_id;
     }
+
+    // Load volume for currently selected device (non-fatal)
+    try { await loadDeviceVolume($("device")?.value || ''); } catch(e) {}
+
     if (prefs.voice_id) {
       $("voice").value = prefs.voice_id;
     }
@@ -272,6 +323,7 @@
   $("device").addEventListener('change', () => {
     savePrefs();
     applyDeviceDefaultVoice();
+    loadDeviceVolume($("device")?.value || '');
   });
   $("voice").addEventListener('change', savePrefs);
 
@@ -284,6 +336,21 @@
       log(`Refresh failed: ${e.message}`);
     }
   });
+
+
+  const volumeSlider = $("volumeSlider");
+  if (volumeSlider) {
+    // live UI update while dragging
+    volumeSlider.addEventListener('input', () => setVolumeValueUI());
+    // commit on release
+    volumeSlider.addEventListener('change', () => {
+      const did = $("device")?.value || '';
+      setVolumeValueUI();
+      saveDeviceVolume(did, volumeSlider.value);
+    });
+    // initialize UI readout
+    setVolumeValueUI(Number(volumeSlider.value || 0));
+  }
 
 
   $("speakBtn").addEventListener('click', async () => {

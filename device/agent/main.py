@@ -123,6 +123,68 @@ def _find_usb_card() -> str | None:
     return None
 
 
+# --- ALSA volume helpers ---
+def _alsa_card_index(cardid: str) -> int | None:
+    """Return ALSA card index (integer) for a given card id from /proc/asound/cards."""
+    try:
+        txt = Path("/proc/asound/cards").read_text()
+    except Exception:
+        return None
+
+    for line in txt.splitlines():
+        # Example: " 0 [Device         ]: USB-Audio - USB Audio Device"
+        s = line.strip()
+        if not s or "[" not in s or "]" not in s:
+            continue
+        try:
+            idx_str = s.split(" ", 1)[0]
+            idx = int(idx_str)
+        except Exception:
+            continue
+        try:
+            cid = s.split("[", 1)[1].split("]", 1)[0].strip()
+        except Exception:
+            continue
+        if cid == cardid:
+            return idx
+    return None
+
+
+def set_output_volume_percent(pct: int) -> dict:
+    """Best-effort set output volume via amixer. Returns details dict."""
+    pct = max(0, min(100, int(pct)))
+
+    if not shutil.which("amixer"):
+        raise RuntimeError("amixer_not_found")
+
+    # Choose target card: prefer detected/forced USB card id.
+    cardid = _find_usb_card()
+    card_index = _alsa_card_index(cardid) if cardid else None
+
+    # Common mixer controls across USB DACs / built-in audio
+    controls = ["Master", "PCM", "Speaker", "Headphone", "Digital"]
+
+    def _run_amixer(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    # Try per-card first if we know the card index
+    if card_index is not None:
+        for ctl in controls:
+            cmd = ["amixer", "-c", str(card_index), "sset", ctl, f"{pct}%"]
+            res = _run_amixer(cmd)
+            if res.returncode == 0:
+                return {"ok": True, "volume_percent": pct, "cardid": cardid, "card_index": card_index, "control": ctl}
+
+    # Fall back: no -c (default card), try controls
+    for ctl in controls:
+        cmd = ["amixer", "sset", ctl, f"{pct}%"]
+        res = _run_amixer(cmd)
+        if res.returncode == 0:
+            return {"ok": True, "volume_percent": pct, "cardid": cardid, "card_index": card_index, "control": ctl}
+
+    raise RuntimeError("amixer_failed")
+
+
 def _aplay_cmd_for(path: Path) -> list[str]:
     """Return the *primary* player command for a file."""
 
@@ -996,6 +1058,25 @@ def main() -> None:
                     "url": url,
                     "audio_id": audio_id,
                 })
+            elif cmd == "set_volume":
+                params = d.get("params")
+                if not isinstance(params, dict):
+                    params = {}
+
+                if "volume_percent" not in params:
+                    raise RuntimeError("volume_percent_required")
+
+                try:
+                    pct = int(params.get("volume_percent"))
+                except Exception:
+                    raise RuntimeError("volume_percent_invalid")
+
+                pct = max(0, min(100, pct))
+
+                # Apply immediately (non-queued) so the next playback uses the new level.
+                details = set_output_volume_percent(pct)
+                publish_ack(str(cid), "completed", details)
+
             elif cmd in {"beep", "speaker_test"}:
                 enqueue_job({"type": "beep", "command_id": str(cid)})
 

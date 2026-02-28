@@ -1901,6 +1901,7 @@ def ui_voices():
 
 # --- UI device config and phrases endpoints ---
 
+
 @app.post("/ui/device/config")
 def ui_device_config_set():
     ar = require_ui_auth()
@@ -1943,6 +1944,117 @@ def ui_device_config_set():
     write_ui_config(cfg)
 
     return jsonify({"ok": True, "device_id": device_id, "config": rec})
+
+
+# --- UI device volume endpoints ---
+
+@app.get("/ui/device/volume")
+def ui_device_volume_get():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    device_id = sanitize_topic_id(str(request.args.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    # Default to 80% if not set yet
+    try:
+        pct = int(rec.get("volume_percent")) if rec.get("volume_percent") is not None else 80
+    except Exception:
+        pct = 80
+    pct = max(0, min(100, pct))
+
+    return jsonify({"ok": True, "device_id": device_id, "volume_percent": pct})
+
+
+@app.post("/ui/device/volume")
+def ui_device_volume_set():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    # Parse and validate volume
+    if "volume_percent" not in body:
+        return jsonify({"ok": False, "error": "volume_percent_required"}), 400
+    try:
+        pct = int(body.get("volume_percent"))
+    except Exception:
+        return jsonify({"ok": False, "error": "volume_percent_invalid"}), 400
+    pct = max(0, min(100, pct))
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+
+    # Optional command metadata
+    command_id = sanitize_topic_id(body.get("command_id") or f"vol-{device_id}-{int(time.time())}")
+    ttl_sec = body.get("ttl_sec")
+    priority = body.get("priority")
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="set_volume",
+        params={"volume_percent": pct},
+        ttl_sec=ttl_sec if ttl_sec is not None else 300,
+        priority=priority if priority is not None else 8,
+    )
+
+    # Persist desired volume on the hub (so UI can reflect it immediately)
+    try:
+        rec["volume_percent"] = pct
+        rec["last_volume_set"] = {
+            "command_id": command_id,
+            "issued_at": int(time.time()),
+            "volume_percent": pct,
+            "state": "sent",
+        }
+        reg[device_id] = rec
+        write_registry(reg)
+    except Exception:
+        # Best-effort; even if this fails, still attempt to publish.
+        pass
+
+    # Optional audit marker (publish_command also logs cmd_issued/cmd_published)
+    try:
+        _append_hub_cmd_log({
+            "event": "volume_set_requested",
+            "site_id": str(site_id),
+            "device_id": str(device_id),
+            "command_id": str(command_id),
+            "volume_percent": int(pct),
+        })
+    except Exception:
+        pass
+
+    try:
+        publish_command(site_id, device_id, payload)
+        try:
+            _mark_sent_in_registry(reg, device_id, command_id, "set_volume")
+            write_registry(reg)
+        except Exception:
+            pass
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({"ok": True, "device_id": device_id, "volume_percent": pct, "command_id": command_id})
 
 
 @app.get("/ui/phrases")
