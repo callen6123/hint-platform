@@ -349,7 +349,7 @@ async function loadAudioStatus(){
 
     rows.push(
       `<tr>`+
-        `<td><strong>HUB</strong></td>`+
+        `<td><strong>Hub</strong></td>`+
         `<td>${pill(hubStatus)}</td>`+
         `<td><span class="muted">${esc(hubVer)}</span></td>`+
         `<td><span class="${hubUpdCls}">${esc(hubUpdText)}</span></td>`+
