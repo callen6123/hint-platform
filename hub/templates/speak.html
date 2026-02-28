@@ -27,7 +27,11 @@
       </div>
       <div>
         <label for="voice">Voice</label>
-        <select id="voice"></select>
+        <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap;">
+          <select id="voice" style="min-width:220px;"></select>
+          <button id="setDefaultVoiceBtn">Set As Default Voice</button>
+          <span class="muted small" id="defaultVoiceStatus"></span>
+        </div>
         <div class="muted" id="voiceHint"></div>
       </div>
     </div>
@@ -177,7 +181,7 @@
 
       <div style="margin-top:10px;">
         <div class="muted small" style="margin-bottom:8px;">
-          Plays your 10 most common phrases instantly (no ElevenLabs call).
+          Plays your 10 most common phrases instantly.
         </div>
 
         <div class="freq-play" id="freqPlay">

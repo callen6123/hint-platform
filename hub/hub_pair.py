@@ -1978,14 +1978,17 @@ def ui_device_config_set():
     if not device_id:
         return jsonify({"ok": False, "error": "device_id_required"}), 400
 
+    # Only set friendly_name if present and non-empty, to avoid clearing it accidentally.
     friendly_name = body.get("friendly_name")
-    default_voice_id = body.get("default_voice_id")
-
     if friendly_name is not None:
         friendly_name = str(friendly_name).strip()
-        # keep it sane
-        friendly_name = friendly_name[:64]
+        if not friendly_name:
+            friendly_name = None
+        else:
+            # keep it sane
+            friendly_name = friendly_name[:64]
 
+    default_voice_id = body.get("default_voice_id")
     if default_voice_id is not None:
         default_voice_id = str(default_voice_id).strip()
         default_voice_id = default_voice_id[:128]
@@ -2002,6 +2005,7 @@ def ui_device_config_set():
 
     if friendly_name is not None:
         rec["friendly_name"] = friendly_name
+    # If friendly_name is None, do not touch existing value.
     if default_voice_id is not None:
         rec["default_voice_id"] = default_voice_id
 

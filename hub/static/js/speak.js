@@ -134,6 +134,12 @@
     el.textContent = s || '';
   }
 
+  function setDefaultVoiceStatus(s){
+    const el = $("defaultVoiceStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
   function setVolumeStatus(s){
     const el = $("volumeStatus");
     if (!el) return;
@@ -468,6 +474,7 @@
   }
 
   $("device").addEventListener('change', () => {
+    setDefaultVoiceStatus('');
     savePrefs();
     applyDeviceDefaultVoice();
     loadDeviceVolume($("device")?.value || '');
@@ -679,6 +686,33 @@
     } catch(e){
       setPhraseStatus('Delete failed.');
       log(`Phrase delete failed: ${e.message}`);
+    }
+  });
+
+  const setDefaultVoiceBtn = $("setDefaultVoiceBtn");
+  if (setDefaultVoiceBtn) setDefaultVoiceBtn.addEventListener('click', async () => {
+    const device_id = $("device")?.value || '';
+    const default_voice_id = $("voice")?.value || '';
+    if (!device_id) { setDefaultVoiceStatus('Pick a device first.'); return; }
+    if (!default_voice_id) { setDefaultVoiceStatus('Pick a voice first.'); return; }
+
+    // Preserve friendly name if that field exists so we don't accidentally clear it.
+    const friendly_name = (document.getElementById('friendlyName')?.value || '').trim();
+
+    try {
+      setDefaultVoiceStatus('Saving…');
+      setDefaultVoiceBtn.disabled = true;
+      await api('/ui/device/config', 'POST', { device_id, default_voice_id, friendly_name });
+      setDefaultVoiceStatus('Saved.');
+      savePrefs();
+      // Refresh device list so cachedDevices reflects the new default_voice_id
+      await refreshAll(false);
+    } catch(e){
+      setDefaultVoiceStatus('Save failed.');
+      log(`Default voice save failed: ${e.message}`);
+    } finally {
+      setDefaultVoiceBtn.disabled = false;
+      setTimeout(() => setDefaultVoiceStatus(''), 1200);
     }
   });
 
