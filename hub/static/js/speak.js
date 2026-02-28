@@ -178,6 +178,45 @@
     }
   }
 
+
+  // --- Playback speed (ElevenLabs) ---
+  function setSpeedStatus(s){
+    const el = $("speedStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
+  function setSpeedValueUI(v){
+    const out = $("speedValue");
+    const slider = $("speedSlider");
+    if (slider && (v === undefined || v === null || Number.isNaN(Number(v)))) {
+      v = Number(slider.value || 1.0);
+    }
+    const sp = Math.max(0.5, Math.min(2.0, Number(v) || 1.0));
+    if (out) out.textContent = `${sp.toFixed(2)}×`;
+    if (slider) slider.value = String(sp);
+  }
+
+  function saveSpeedPref(sp){
+    try { localStorage.setItem('hint_speed', String(sp)); } catch {}
+  }
+
+  function loadSpeedPref(){
+    try {
+      const v = parseFloat(localStorage.getItem('hint_speed') || '');
+      return Number.isFinite(v) ? v : 1.0;
+    } catch {
+      return 1.0;
+    }
+  }
+
+  function getCurrentSpeed(){
+    const slider = $("speedSlider");
+    if (!slider) return loadSpeedPref();
+    const v = parseFloat(slider.value || '1.0');
+    return Number.isFinite(v) ? v : loadSpeedPref();
+  }
+
   function setPhraseStatus(s){
     const el = $("phraseStatus");
     if (!el) return;
@@ -193,6 +232,7 @@
     try {
       localStorage.setItem('hint_voice_id', $("voice").value || '');
       localStorage.setItem('hint_device_id', $("device").value || '');
+      localStorage.setItem('hint_speed', String(getCurrentSpeed()));
     } catch {}
   }
 
@@ -353,6 +393,27 @@
   }
 
 
+  const speedSlider = $("speedSlider");
+  if (speedSlider) {
+    // Initialize from localStorage (so it's sticky across refreshes)
+    const sp0 = loadSpeedPref();
+    speedSlider.value = String(sp0);
+    setSpeedValueUI(sp0);
+
+    // live UI update while dragging
+    speedSlider.addEventListener('input', () => setSpeedValueUI());
+
+    // persist on release
+    speedSlider.addEventListener('change', () => {
+      setSpeedValueUI();
+      const sp = getCurrentSpeed();
+      saveSpeedPref(sp);
+      setSpeedStatus('Saved.');
+      setTimeout(() => setSpeedStatus(''), 800);
+    });
+  }
+
+
   $("speakBtn").addEventListener('click', async () => {
     const device_id = $("device").value || '';
     const voice_id = $("voice").value || '';
@@ -383,7 +444,8 @@
       setStatus('Generating…');
       setSpeakProgress('generated', 'Generating audio on hub…');
       log(`Speak: device=${device_id}, voice=${voice_id}, chars=${text.length}`);
-      const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id } });
+      const speed = getCurrentSpeed();
+      const r = await api('/ui/speak', 'POST', { device_id, text, tts: { voice_id, speed } });
       // Hub has generated/stored audio and published the command at this point.
       setSpeakProgress('sent', r && r.command_id ? `Command ID: ${r.command_id}` : 'Sent');
       log(`Queued: ${JSON.stringify(r)}`);

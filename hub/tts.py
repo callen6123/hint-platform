@@ -104,6 +104,7 @@ def synthesize(
     similarity_boost: float | None = None,
     style: float | None = None,
     speaker_boost: bool | None = None,
+    speed: float | None = None,
     timeout_sec: float = 60.0,
 ) -> TTSResult:
     """Synthesize speech via ElevenLabs.
@@ -152,6 +153,14 @@ def synthesize(
         voice_settings["style"] = float(style)
     if speaker_boost is not None:
         voice_settings["use_speaker_boost"] = bool(speaker_boost)
+    if speed is not None:
+        try:
+            sp = float(speed)
+        except Exception:
+            sp = None
+        if sp is not None:
+            sp = max(0.7, min(1.2, sp))
+            voice_settings["speed"] = sp
 
     payload: dict[str, Any] = {
         "text": t,

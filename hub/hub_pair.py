@@ -2369,7 +2369,7 @@ def ui_speak():
 
     Body:
       {"device_id": "...", "text": "...", "command_id": "optional", "ttl_sec": 300, "priority": 5,
-       "tts": {"voice_id": "...", "model": "...", "stability": 0.5, "similarity_boost": 0.5}}
+       "tts": {"voice_id": "...", "model": "...", "stability": 0.5, "similarity_boost": 0.5, "speed": 1.0}}
     """
     ar = require_ui_auth()
     if ar is not None:
@@ -2407,6 +2407,15 @@ def ui_speak():
     # Our tts.synthesize() requires keyword-only voice_id.
     if not isinstance(tts_opts, dict):
         tts_opts = {}
+
+    # Optional speed control (ElevenLabs voice_settings.speed). Clamp to 0.7..1.2.
+    if "speed" in tts_opts and tts_opts.get("speed") is not None:
+        try:
+            sp = float(tts_opts.get("speed"))
+        except Exception:
+            return jsonify({"ok": False, "error": "speed_invalid"}), 400
+        sp = max(0.7, min(1.2, sp))
+        tts_opts["speed"] = sp
 
     # Prefer per-device default voice set via UI config, then env default.
     ui_dev_cfg = get_device_ui_cfg(device_id)
