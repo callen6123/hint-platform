@@ -344,7 +344,7 @@ async function loadAudioStatus(){
     const rows = [];
 
     const hubUpdAvail = (data && typeof data.hub_update_available === 'boolean') ? data.hub_update_available : null;
-    const hubUpdText = (hubUpdAvail === true) ? 'UPDATE AVAILABLE' : (hubUpdAvail === false ? 'UP TO DATE' : '—');
+    const hubUpdText = (hubUpdAvail === true) ? 'Update Available' : (hubUpdAvail === false ? 'Up To Date' : '—');
     const hubUpdCls = (hubUpdAvail === true) ? 'status-offline' : (hubUpdAvail === false ? 'status-online' : 'muted');
 
     rows.push(
@@ -367,7 +367,7 @@ async function loadAudioStatus(){
       const needsUpdate = otaLatest && avRaw && (avRaw !== '(unknown)') && (avRaw !== String(otaLatest));
       const av = needsUpdate ? `${avRaw} → ${otaLatest}` : avRaw;
 
-      const updText = needsUpdate ? 'UPDATE AVAILABLE' : 'UP TO DATE';
+      const updText = needsUpdate ? 'Update Available' : 'Up To Date';
       const updCls = needsUpdate ? 'status-offline' : 'status-online';
 
       rows.push(
