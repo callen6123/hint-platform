@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
 import requests
 from flask import Flask, request
 
@@ -237,8 +238,35 @@ def join_venue_wifi(ssid: str, psk: str) -> None:
     raise RuntimeError(f"Timed out waiting for Wi-Fi connection/IP. Last: {last_state}")
 
 def read_device_id() -> str:
-    with open(DEVICE_ID_PATH, "r") as f:
-        return f.read().strip()
+    """Return a stable per-device ID.
+
+    If the image was cloned and `/etc/hint/device_id` doesn't exist yet, generate
+    a new UUID and persist it so this device stays unique across reboots.
+    """
+    # If already present, just read it.
+    try:
+        with open(DEVICE_ID_PATH, "r") as f:
+            existing = f.read().strip()
+            if existing:
+                return existing
+    except FileNotFoundError:
+        pass
+
+    # Ensure directory exists.
+    os.makedirs(os.path.dirname(DEVICE_ID_PATH), exist_ok=True)
+
+    # Generate a new ID and write it atomically.
+    new_id = uuid.uuid4().hex  # 32-char lowercase hex
+    tmp = "/tmp/device_id"
+    with open(tmp, "w") as f:
+        f.write(new_id + "\n")
+
+    # Write to /etc/hint/device_id with root permissions (setup typically runs as root).
+    # Use the same sudo+cp pattern as provisioning to avoid permission surprises.
+    sh(["sudo", "cp", tmp, DEVICE_ID_PATH])
+    sh(["sudo", "chmod", "600", DEVICE_ID_PATH])
+
+    return new_id
 
 @app.get("/")
 def index():
