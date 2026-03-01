@@ -1,15 +1,15 @@
-
-
 import json
 import os
 import shutil
 import subprocess
 import time
+import secrets
 
 from flask import Flask, request
 
 # Hub provisioning marker/config
 PROVISION_PATH = "/etc/hint/hub_provision.json"
+HUB_ENV_PATH = "/etc/hint/hub.env"
 
 # If your hub service has a different name, change it here.
 HUB_SERVICE_NAMES = [
@@ -41,6 +41,7 @@ HTML_TEMPLATE = """
 
     <form method=\"post\" action=\"/submit\">
       {wifi_fields}
+      {admin_fields}
 
       <button type=\"submit\" style=\"padding:12px 18px\">Connect & Provision Hub</button>
     </form>
@@ -55,9 +56,72 @@ WIFI_FIELDS_HTML = """
 <input name=\"psk\" type=\"password\" style=\"width:100%;padding:10px\" required><br><br>
 """
 
+ADMIN_FIELDS_HTML = """
+<h3>Hub Admin</h3>
+<label>Admin Username</label><br>
+<input name=\"admin_user\" style=\"width:100%;padding:10px\" value=\"admin\" required><br><br>
+<label>Admin Password</label><br>
+<input name=\"admin_pass\" type=\"password\" style=\"width:100%;padding:10px\" required><br><br>
+"""
+
 
 def sh(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
+
+
+def read_env_file(path: str) -> dict[str, str]:
+    """Parse a simple KEY=VALUE env file. Preserves unknown keys.
+
+    Lines starting with # or blank lines are ignored.
+    Values are taken verbatim after the first '='.
+    """
+    env: dict[str, str] = {}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                k, v = s.split("=", 1)
+                env[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def write_env_file(path: str, env: dict[str, str]) -> None:
+    """Write env vars to a root-owned 600 file via sudo cp."""
+    # Stable ordering for readability.
+    preferred = [
+        "ELEVENLABS_API_KEY",
+        "HINT_UI_USER",
+        "HINT_UI_PASS",
+        "HINT_UI_SECRET",
+        "HINT_DASH_API_KEY",
+    ]
+
+    lines: list[str] = [
+        "# Hint Hub environment",
+        "# ELEVENLABS_API_KEY is provisioned manually before shipping.",
+    ]
+
+    # Write preferred keys first (even if blank).
+    for k in preferred:
+        lines.append(f"{k}={env.get(k, '')}")
+
+    # Then write any other keys that already exist.
+    for k in sorted(env.keys()):
+        if k in preferred:
+            continue
+        lines.append(f"{k}={env[k]}")
+
+    tmp = "/tmp/hub.env"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+    sh(["sudo", "cp", tmp, path])
+    sh(["sudo", "chown", "root:root", path])
+    sh(["sudo", "chmod", "600", path])
 
 
 def nmcli(*args: str) -> str:
@@ -251,7 +315,7 @@ def render_index_html(wired: bool) -> str:
         )
         wifi_fields = WIFI_FIELDS_HTML
 
-    return HTML_TEMPLATE.format(connection_note=note, wifi_fields=wifi_fields)
+    return HTML_TEMPLATE.format(connection_note=note, wifi_fields=wifi_fields, admin_fields=ADMIN_FIELDS_HTML)
 
 
 @app.get("/")
@@ -264,8 +328,13 @@ def index():
 def submit():
     ssid = request.form.get("ssid", "").strip()
     psk = request.form.get("psk", "").strip()
+    admin_user = request.form.get("admin_user", "").strip()
+    admin_pass = request.form.get("admin_pass", "").strip()
 
     wired = has_ipv4("eth0")
+
+    if not admin_user or not admin_pass:
+        return "Missing admin credentials", 400
 
     if not wired and (not ssid or not psk):
         return "Missing Wi-Fi fields", 400
@@ -276,6 +345,27 @@ def submit():
             join_venue_wifi(ssid, psk)
         except Exception as e:
             return f"Failed to join venue Wi-Fi: {e}", 500
+
+    # Provision hub.env (UI creds + secrets) WITHOUT asking for ElevenLabs.
+    # Preserve any existing ELEVENLABS_API_KEY you manually install before shipping.
+    env = read_env_file(HUB_ENV_PATH)
+    if "ELEVENLABS_API_KEY" not in env:
+        env["ELEVENLABS_API_KEY"] = ""
+
+    env["HINT_UI_USER"] = admin_user
+    env["HINT_UI_PASS"] = admin_pass
+
+    if not env.get("HINT_UI_SECRET", "").strip():
+        env["HINT_UI_SECRET"] = secrets.token_urlsafe(32)
+
+    # Optional: seed a dashboard/API key if used.
+    if not env.get("HINT_DASH_API_KEY", "").strip():
+        env["HINT_DASH_API_KEY"] = secrets.token_urlsafe(32)
+
+    try:
+        write_env_file(HUB_ENV_PATH, env)
+    except Exception as e:
+        return f"Failed to write hub.env: {e}", 500
 
     # Mark provisioned so we don't enter setup mode again.
     provision = {
