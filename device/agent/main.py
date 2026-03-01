@@ -65,6 +65,8 @@ OTA_RELEASES = Path("/opt/hint/agent_releases")
 AGENT_CURRENT = Path("/opt/hint/agent_current")
 SETUP_RELEASES = Path("/opt/hint/device_setup_releases")
 SETUP_CURRENT = Path("/opt/hint/device_setup_current")
+SCRIPTS_RELEASES = Path("/opt/hint/device_scripts_releases")
+SCRIPTS_CURRENT = Path("/opt/hint/device_scripts_current")
 
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
@@ -429,6 +431,7 @@ def do_ota_update(prov: dict) -> dict:
     OTA_STAGING.mkdir(parents=True, exist_ok=True)
     OTA_RELEASES.mkdir(parents=True, exist_ok=True)
     SETUP_RELEASES.mkdir(parents=True, exist_ok=True)
+    SCRIPTS_RELEASES.mkdir(parents=True, exist_ok=True)
 
     tmp = OTA_STAGING / fname
 
@@ -449,20 +452,35 @@ def do_ota_update(prov: dict) -> dict:
     dev = work / "device"
     agent_src = dev / "agent"
     setup_src = dev / "device_setup"
+    scripts_src = dev / "scripts"
 
     if not agent_src.exists() or not setup_src.exists():
         raise RuntimeError("Invalid OTA bundle layout")
 
     agent_dst = OTA_RELEASES / ver
     setup_dst = SETUP_RELEASES / ver
+    scripts_dst = SCRIPTS_RELEASES / ver
 
     if agent_dst.exists():
         shutil.rmtree(agent_dst)
     if setup_dst.exists():
         shutil.rmtree(setup_dst)
+    if scripts_dst.exists():
+        shutil.rmtree(scripts_dst)
 
     shutil.copytree(agent_src, agent_dst)
     shutil.copytree(setup_src, setup_dst)
+
+    # Scripts are optional; if present, install them too so maintenance commands like
+    # factory reset stay in sync with the repo.
+    if scripts_src.exists():
+        shutil.copytree(scripts_src, scripts_dst)
+        # Best-effort ensure shell scripts are executable.
+        try:
+            for p in scripts_dst.rglob("*.sh"):
+                p.chmod(0o755)
+        except Exception:
+            pass
 
     # Atomically switch
     AGENT_CURRENT.unlink(missing_ok=True)
@@ -470,6 +488,10 @@ def do_ota_update(prov: dict) -> dict:
 
     SETUP_CURRENT.unlink(missing_ok=True)
     SETUP_CURRENT.symlink_to(setup_dst)
+
+    if scripts_src.exists():
+        SCRIPTS_CURRENT.unlink(missing_ok=True)
+        SCRIPTS_CURRENT.symlink_to(scripts_dst)
 
     # Restart setup so provisioning UI (if ever used again) runs the updated code.
     # Do NOT restart hint-agent from inside itself; we will exit after ACK and let systemd restart.
