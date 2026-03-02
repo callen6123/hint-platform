@@ -2033,6 +2033,55 @@ def ui_voices():
     })
 
 
+# --- UI Speak Page (per-device and shared renderer) ---
+
+def _render_speak_page(fixed_device_id: str | None = None):
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    # Build a list of devices for nav/selector
+    devices = []
+    for did, rec in reg.items():
+        if not did:
+            continue
+        label = did
+        try:
+            ui_cfg = get_device_ui_cfg(did)
+            fn = str(ui_cfg.get("friendly_name") or "").strip()
+            if fn:
+                label = fn
+        except Exception:
+            pass
+        devices.append({"device_id": did, "label": label})
+
+    devices.sort(key=lambda x: (str(x.get("label") or "").lower(), str(x.get("device_id") or "")))
+
+    fixed = sanitize_topic_id(str(fixed_device_id or ""))
+    if fixed and fixed not in reg:
+        return redirect("/speak")
+
+    return render_template(
+        "speak.html",
+        devices=devices,
+        fixed_device_id=(fixed if fixed else None),
+    )
+
+
+@app.get("/speak")
+def ui_speak_page():
+    return _render_speak_page(None)
+
+
+@app.get("/speak/<device_id>")
+def ui_speak_page_device(device_id: str):
+    return _render_speak_page(device_id)
+
+
 # --- UI device config and phrases endpoints ---
 
 

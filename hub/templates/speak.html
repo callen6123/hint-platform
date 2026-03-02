@@ -15,6 +15,13 @@
         <!-- <a href="/speak"><b>Speak</b></a> -->
       <a href="/dashboard" target="_blank" rel="noopener noreferrer" style="margin-left:10px; padding:8px 12px;">DASHBOARD</a>
       <a href="/voices" target="_blank" rel="noopener noreferrer" style="margin-left:10px; padding:8px 12px;">VOICE DEMOS</a>
+      <span style="margin-left:12px; opacity:0.7;">|</span>
+      {% if devices %}
+        <span style="margin-left:12px;">Devices:</span>
+        {% for d in devices %}
+          <a href="/speak/{{ d.device_id }}" style="margin-left:10px; padding:8px 12px;">{{ d.label }}</a>
+        {% endfor %}
+      {% endif %}
       <!-- </nav> -->
     </div>
   </header>
@@ -23,7 +30,21 @@
     <div class="row">
       <div>
         <label for="device">Device</label>
-        <select id="device"></select>
+
+        {% if fixed_device_id %}
+          <div style="font-weight:600; padding:6px 0;">{{ fixed_device_id }}</div>
+          <select id="device" style="display:none;">
+            <option value="{{ fixed_device_id }}" selected>{{ fixed_device_id }}</option>
+          </select>
+        {% else %}
+          <select id="device">
+            <option value="">-- select --</option>
+            {% for d in devices %}
+              <option value="{{ d.device_id }}">{{ d.label }}</option>
+            {% endfor %}
+          </select>
+        {% endif %}
+
         <div class="muted" id="deviceHint"></div>
       </div>
       <div>
@@ -304,5 +325,10 @@
   <!-- <div class="log" id="log"></div> -->
 
   <script defer src="{{ url_for('static', filename='js/speak.js') }}"></script>
+  {% if fixed_device_id %}
+  <script>
+    window.HINT_FIXED_DEVICE_ID = "{{ fixed_device_id }}";
+  </script>
+  {% endif %}
 </body>
 </html>

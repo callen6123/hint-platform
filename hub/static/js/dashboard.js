@@ -354,6 +354,7 @@ async function loadAudioStatus(){
         `<td><span class="muted">${esc(hubVer)}</span></td>`+
         `<td><span class="${hubUpdCls}">${esc(hubUpdText)}</span></td>`+
         `<td><button id="hubUpdate">Update Hub</button></td>`+
+        `<td></td>`+ // Speak column (empty for Hub)
         `<td></td>`+
       `</tr>`
     );
@@ -380,13 +381,16 @@ async function loadAudioStatus(){
             (did ? `<button data-action="buildUpdate" data-device="${esc(did)}">Build+Update</button>` : '')+
           `</td>`+
           `<td>`+
+            (did ? `<a class="btn" href="/speak/${esc(did)}">Speak</a>` : '')+
+          `</td>`+
+          `<td>`+
             (did ? `<button data-action="beep" data-device="${esc(did)}">Beep</button>` : '')+
           `</td>`+
         `</tr>`
       );
     }
 
-    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">No devices.</td></tr>';
+    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="7" class="muted">No devices.</td></tr>';
   }
 
   function setDevCfgStatus(s){

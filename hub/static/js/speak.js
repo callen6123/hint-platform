@@ -346,7 +346,9 @@
   function savePrefs(){
     try {
       localStorage.setItem('hint_voice_id', $("voice").value || '');
-      localStorage.setItem('hint_device_id', $("device").value || '');
+      if (!window.HINT_FIXED_DEVICE_ID) {
+        localStorage.setItem('hint_device_id', $("device").value || '');
+      }
       localStorage.setItem('hint_speed', String(getCurrentSpeed()));
     } catch {}
   }
@@ -445,7 +447,10 @@
     const devices = await loadDevices();
     const voices = await loadVoices(!!forceVoices);
 
-    if (prefs.device_id) {
+    // If this page is device-scoped, force the selected device.
+    if (window.HINT_FIXED_DEVICE_ID) {
+      $("device").value = window.HINT_FIXED_DEVICE_ID;
+    } else if (prefs.device_id) {
       $("device").value = prefs.device_id;
     }
 
@@ -482,6 +487,11 @@
   }
 
   $("device").addEventListener('change', () => {
+    // On per-device pages the selector is hidden and should not change.
+    if (window.HINT_FIXED_DEVICE_ID) {
+      $("device").value = window.HINT_FIXED_DEVICE_ID;
+      return;
+    }
     setDefaultVoiceStatus('');
     savePrefs();
     applyDeviceDefaultVoice();
