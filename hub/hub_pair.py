@@ -2071,12 +2071,6 @@ def _render_speak_page(fixed_device_id: str | None = None):
         fixed_device_id=(fixed if fixed else None),
     )
 
-
-@app.get("/speak")
-def ui_speak_page():
-    return _render_speak_page(None)
-
-
 @app.get("/speak/<device_id>")
 def ui_speak_page_device(device_id: str):
     return _render_speak_page(device_id)
