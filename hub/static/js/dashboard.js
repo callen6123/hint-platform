@@ -381,7 +381,7 @@ async function loadAudioStatus(){
             (did ? `<button data-action="buildUpdate" data-device="${esc(did)}">Build+Update</button>` : '')+
           `</td>`+
           `<td>`+
-            (did ? `<a class="btn" href="/speak/${esc(did)}">Speak</a>` : '')+
+            (did ? `<a class="btn" href="/speak/${esc(did)}" target="_blank" rel="noopener noreferrer">Speak</a>` : '')+
           `</td>`+
           `<td>`+
             (did ? `<button data-action="beep" data-device="${esc(did)}">Beep</button>` : '')+

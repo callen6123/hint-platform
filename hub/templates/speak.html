@@ -19,7 +19,7 @@
       {% if devices %}
         <span style="margin-left:12px;">Devices:</span>
         {% for d in devices %}
-          <a href="/speak/{{ d.device_id }}" style="margin-left:10px; padding:8px 12px;">{{ d.label }}</a>
+          <a href="/speak/{{ d.device_id }}" target="_blank" rel="noopener noreferrer" style="margin-left:10px; padding:8px 12px;">{{ d.label }}</a>
         {% endfor %}
       {% endif %}
       <!-- </nav> -->
