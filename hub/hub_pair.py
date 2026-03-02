@@ -829,6 +829,65 @@ def _set_saved_audio_item(key: str, item: dict) -> dict:
     write_ui_config(cfg)
     return out
 
+def _set_saved_audio_item_for_device(device_id: str, key: str, item: dict) -> dict:
+    """Upsert a saved-audio item for a specific device_id."""
+    device_id = sanitize_topic_id(str(device_id or ""))
+    key = sanitize_topic_id(str(key or ""))
+    if not device_id or not key:
+        return {}
+
+    cfg = read_ui_config()
+    sa_all = cfg.get("saved_audio")
+    if not isinstance(sa_all, dict):
+        sa_all = {}
+        cfg["saved_audio"] = sa_all
+
+    dev_map = sa_all.get(device_id)
+    if not isinstance(dev_map, dict):
+        dev_map = {}
+        sa_all[device_id] = dev_map
+
+    out: dict = {}
+    if isinstance(item, dict):
+        if "text" in item and item.get("text") is not None:
+            out["text"] = str(item.get("text") or "").strip()[:2000]
+        if "audio_id" in item and item.get("audio_id") is not None:
+            out["audio_id"] = str(item.get("audio_id") or "").strip()[:256]
+        if "ext" in item and item.get("ext") is not None:
+            out["ext"] = str(item.get("ext") or "").strip().lstrip(".")[:16]
+        if "updated_at" in item and item.get("updated_at") is not None:
+            out["updated_at"] = str(item.get("updated_at") or "").strip()[:64]
+
+    if "updated_at" not in out:
+        out["updated_at"] = utc_now_iso()
+
+    dev_map[key] = out
+    write_ui_config(cfg)
+    return out
+
+
+def _get_saved_audio_item_for_device(device_id: str, key: str) -> dict | None:
+    """Get saved-audio item for device_id, falling back to legacy global key if present."""
+    device_id = sanitize_topic_id(str(device_id or ""))
+    key = sanitize_topic_id(str(key or ""))
+    if not key:
+        return None
+
+    cfg = read_ui_config()
+    sa_all = cfg.get("saved_audio") if isinstance(cfg, dict) else None
+    if not isinstance(sa_all, dict):
+        return None
+
+    if device_id:
+        dev_map = sa_all.get(device_id)
+        if isinstance(dev_map, dict):
+            it = dev_map.get(key)
+            if isinstance(it, dict):
+                return it
+
+    # Legacy fallback (pre per-device)
+    it2 = sa_all.get(key)
+    return it2 if isinstance(it2, dict) else None
 
 # --- UI users/auth storage ---
 
@@ -2449,11 +2508,21 @@ def ui_saved_audio_list():
     if ar is not None:
         return ar
 
-    sa = _get_saved_audio_cfg()
-    items = {}
+    device_id = sanitize_topic_id(str(request.args.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
 
-    # Return a stable, sanitized mapping
-    for k, v in (sa or {}).items():
+    cfg = read_ui_config()
+    sa_all = cfg.get("saved_audio") if isinstance(cfg, dict) else None
+    if not isinstance(sa_all, dict):
+        sa_all = {}
+
+    dev_map = sa_all.get(device_id)
+    if not isinstance(dev_map, dict):
+        dev_map = {}
+
+    items = {}
+    for k, v in (dev_map or {}).items():
         key = sanitize_topic_id(str(k or ""))
         if not key or not isinstance(v, dict):
             continue
@@ -2468,7 +2537,7 @@ def ui_saved_audio_list():
             "updated_at": v.get("updated_at"),
         }
 
-    return jsonify({"ok": True, "items": items})
+    return jsonify({"ok": True, "device_id": device_id, "items": items})
 
 
 @app.post("/ui/saved-audio/generate")
@@ -2489,6 +2558,8 @@ def ui_saved_audio_generate():
     key = sanitize_topic_id(str(body.get("key") or ""))
     text = str(body.get("text") or "").strip()
     device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
 
     if not key:
         return jsonify({"ok": False, "error": "key_required"}), 400
@@ -2575,7 +2646,7 @@ def ui_saved_audio_generate():
 
     # If this key already exists, delete the previous pinned file so we don't accumulate.
     try:
-        prev = _get_saved_audio_cfg().get(key)
+        prev = _get_saved_audio_item_for_device(device_id, key)
         if isinstance(prev, dict):
             prev_audio_id = str(prev.get("audio_id") or "").strip()
             prev_ext = str(prev.get("ext") or "").strip().lstrip(".")
@@ -2610,7 +2681,12 @@ def ui_saved_audio_generate():
         return jsonify({"ok": False, "error": "audio_store_failed:missing_audio_id"}), 500
 
     # Persist mapping in ui_config
-    item = _set_saved_audio_item(key, {"text": text, "audio_id": audio_id, "ext": ext, "updated_at": utc_now_iso()})
+    item = _set_saved_audio_item_for_device(device_id, key, {
+        "text": text,
+        "audio_id": audio_id,
+        "ext": ext,
+        "updated_at": utc_now_iso(),
+    })
 
     _append_hub_cmd_log({
         "event": "saved_audio_generated",
@@ -2644,19 +2720,17 @@ def ui_saved_audio_play():
         return jsonify({"ok": False, "error": "device_id_required"}), 400
     if not key:
         return jsonify({"ok": False, "error": "key_required"}), 400
+    
+    item = _get_saved_audio_item_for_device(device_id, key)
+    if not isinstance(item, dict) or not str(item.get("audio_id") or "").strip():
+        return jsonify({"ok": False, "error": "no_audio_for_key"}), 404
 
     if store_audio is None or build_audio_url is None:
         return jsonify({"ok": False, "error": "audio_server_not_configured"}), 500
-
-    # Lookup mapping
-    sa = _get_saved_audio_cfg()
-    item = sa.get(key) if isinstance(sa, dict) else None
-    if not isinstance(item, dict):
-        return jsonify({"ok": False, "error": "unknown_key"}), 404
-
+    
     audio_id = str(item.get("audio_id") or "").strip()
     if not audio_id:
-        return jsonify({"ok": False, "error": "audio_missing_for_key"}), 404
+        return jsonify({"ok": False, "error": "no_audio_for_key"}), 404
 
     # Device registry
     reg = read_registry()

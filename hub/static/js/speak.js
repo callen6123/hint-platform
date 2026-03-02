@@ -286,7 +286,9 @@
   async function loadSavedAudioDefs(){
     // Optional endpoint; if not implemented yet, silently ignore.
     try {
-      const data = await api('/ui/saved-audio/list', 'GET');
+      const did = (document.getElementById('device')?.value || '').trim();
+      const qs = did ? `?device_id=${encodeURIComponent(did)}` : '';
+      const data = await api('/ui/saved-audio/list' + qs, 'GET');
       const items = (data && data.items) ? data.items : {};
 
       document.querySelectorAll('input.savedAudioText').forEach(inp => {
@@ -484,6 +486,8 @@
     savePrefs();
     applyDeviceDefaultVoice();
     loadDeviceVolume($("device")?.value || '');
+    // Refresh Saved/Frequent audio UI for the newly selected device.
+    loadSavedAudioDefs().catch(() => {});
   });
   $("voice").addEventListener('change', savePrefs);
 
