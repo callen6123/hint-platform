@@ -2065,10 +2065,18 @@ def _render_speak_page(fixed_device_id: str | None = None):
     if fixed and fixed not in reg:
         return redirect("/speak")
 
+    fixed_label = None
+    if fixed:
+        for d in devices:
+            if str(d.get("device_id") or "") == fixed:
+                fixed_label = str(d.get("label") or fixed)
+                break
+
     return render_template(
         "speak.html",
         devices=devices,
         fixed_device_id=(fixed if fixed else None),
+        fixed_device_label=fixed_label,
     )
 
 @app.get("/speak/<device_id>")

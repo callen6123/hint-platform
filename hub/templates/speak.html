@@ -32,7 +32,7 @@
         <label for="device">Device</label>
 
         {% if fixed_device_id %}
-          <div style="font-weight:600; padding:6px 0;">{{ fixed_device_id }}</div>
+          <div style="font-weight:600; padding:6px 0;">{{ fixed_device_label or fixed_device_id }}</div>
           <select id="device" style="display:none;">
             <option value="{{ fixed_device_id }}" selected>{{ fixed_device_id }}</option>
           </select>
