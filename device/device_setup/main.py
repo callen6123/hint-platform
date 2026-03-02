@@ -237,6 +237,7 @@ def join_venue_wifi(ssid: str, psk: str) -> None:
 
     raise RuntimeError(f"Timed out waiting for Wi-Fi connection/IP. Last: {last_state}")
 
+
 def read_device_id() -> str:
     """Return a stable per-device ID.
 
@@ -268,6 +269,63 @@ def read_device_id() -> str:
 
     return new_id
 
+
+# --- Hostname helpers ---
+def desired_hostname(device_id: str) -> str:
+    """Generate a stable, unique hostname for the device.
+
+    Keep it short for mDNS friendliness and to fit hostname limits.
+    """
+    short = (device_id or "").strip().lower()[:8]
+    # Ensure only safe chars (uuid hex is already safe)
+    if not short:
+        short = "unknown"
+    return f"hintdev-{short}"
+
+
+def set_hostname(hostname: str) -> None:
+    """Set system hostname and update /etc/hosts mapping."""
+    hostname = hostname.strip().lower()
+    if not hostname:
+        raise RuntimeError("hostname is empty")
+
+    # Read current hostname; if already correct, do nothing.
+    try:
+        current = subprocess.check_output(["hostname"], text=True).strip().lower()
+        if current == hostname:
+            return
+    except Exception:
+        pass
+
+    # Set hostname (persists /etc/hostname under systemd)
+    sh(["sudo", "hostnamectl", "set-hostname", hostname])
+
+    # Ensure 127.0.1.1 maps to the hostname for local resolution.
+    # Replace an existing 127.0.1.1 line if present; otherwise append one.
+    tmp_hosts = "/tmp/hosts"
+    try:
+        with open("/etc/hosts", "r") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        lines = []
+
+    out_lines: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.strip().startswith("127.0.1.1"):
+            out_lines.append(f"127.0.1.1\t{hostname}")
+            replaced = True
+        else:
+            out_lines.append(line)
+
+    if not replaced:
+        out_lines.append(f"127.0.1.1\t{hostname}")
+
+    with open(tmp_hosts, "w") as f:
+        f.write("\n".join(out_lines) + "\n")
+
+    sh(["sudo", "cp", tmp_hosts, "/etc/hosts"])
+
 @app.get("/")
 def index():
     wired = has_ipv4("eth0")
@@ -288,6 +346,12 @@ def submit():
         return "Missing Wi-Fi fields", 400
 
     device_id = read_device_id()
+
+    # Ensure a unique hostname so multiple devices on the same LAN are easy to manage.
+    try:
+        set_hostname(desired_hostname(device_id))
+    except Exception as e:
+        return f"Failed to set hostname: {e}", 500
 
     # Only switch Wi-Fi if we're not already on Ethernet.
     if not wired:

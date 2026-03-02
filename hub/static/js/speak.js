@@ -254,6 +254,12 @@
     el.textContent = s || '';
   }
 
+  function setSavedAudioPlayStatus(s){
+    const el = $("savedAudioPlayStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
   function setFreqAudioGenStatus(s){
     const el = $("freqAudioGenStatus");
     if (!el) return;
