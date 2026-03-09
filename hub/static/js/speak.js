@@ -607,6 +607,9 @@
           if (st === 'completed') {
             setStatus('Completed');
             setSpeakProgress('completed', `Command ID: ${r.command_id}`);
+            const textEl = $("text");
+            if (textEl) textEl.value = '';
+            updateCharCount();
           } else if (st) {
             setStatus(st.charAt(0).toUpperCase() + st.slice(1));
             setSpeakProgress(st, `Command ID: ${r.command_id}`);
@@ -614,6 +617,9 @@
         }
       } else {
         setStatus('Sent');
+        const textEl = $("text");
+        if (textEl) textEl.value = '';
+        updateCharCount();
       }
     } catch(e){
       setStatus('Error');
