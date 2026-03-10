@@ -3006,6 +3006,19 @@ def ui_speak():
     if not audio_id:
         return jsonify({"ok": False, "error": "audio_store_failed:missing_audio_id"}), 500
 
+    # Persist the most recently generated message for this device so it can be replayed
+    # without another ElevenLabs call.
+    try:
+        _set_saved_audio_item_for_device(device_id, "last_message", {
+            "text": text,
+            "audio_id": audio_id,
+            "ext": ext,
+            "updated_at": utc_now_iso(),
+        })
+    except Exception:
+        # Best-effort only; replay-last should not block live speak.
+        pass
+
     try:
         url = build_audio_url(
             base_url=HUB_BASE_URL,
