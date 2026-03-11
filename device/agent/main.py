@@ -1108,6 +1108,7 @@ def main() -> None:
         }
 
         try:
+            print(f"[AUDIO_LEVEL] topic={audio_level_t} level={level} playing={playing} cid={cid} source={source}")
             c.publish(audio_level_t, json.dumps(payload), qos=0, retain=False)
         except Exception:
             pass
