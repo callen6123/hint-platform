@@ -12,6 +12,9 @@ import signal
 import threading
 import queue
 from pathlib import Path
+import wave
+import math
+import array
 
 import paho.mqtt.client as mqtt
 
@@ -67,6 +70,15 @@ SETUP_RELEASES = Path("/opt/hint/device_setup_releases")
 SETUP_CURRENT = Path("/opt/hint/device_setup_current")
 SCRIPTS_RELEASES = Path("/opt/hint/device_scripts_releases")
 SCRIPTS_CURRENT = Path("/opt/hint/device_scripts_current")
+
+# Audio amplitude publishing
+HINT_AUDIO_LEVEL_ENABLED = os.environ.get("HINT_AUDIO_LEVEL_ENABLED", "0").lower() in {"1","true","yes"}
+HINT_AUDIO_LEVEL_RATE_HZ = float(os.environ.get("HINT_AUDIO_LEVEL_RATE_HZ", "25"))
+HINT_AUDIO_LEVEL_RATE_HZ = max(5.0, min(HINT_AUDIO_LEVEL_RATE_HZ, 60.0))
+HINT_AUDIO_LEVEL_SMOOTHING = float(os.environ.get("HINT_AUDIO_LEVEL_SMOOTHING", "0.35"))
+HINT_AUDIO_LEVEL_SMOOTHING = max(0.0, min(HINT_AUDIO_LEVEL_SMOOTHING, 1.0))
+HINT_AUDIO_LEVEL_FLOOR = float(os.environ.get("HINT_AUDIO_LEVEL_FLOOR", "0.03"))
+HINT_AUDIO_LEVEL_FLOOR = max(0.0, min(HINT_AUDIO_LEVEL_FLOOR, 0.5))
 
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
@@ -262,6 +274,47 @@ def sniff_audio_type(path: Path) -> str:
 
     return "unknown"
 
+def compute_rms_envelope(path: Path, rate_hz: float):
+    """Return normalized RMS levels for WAV file."""
+    try:
+        with wave.open(str(path), "rb") as w:
+            fr = w.getframerate()
+            sw = w.getsampwidth()
+            nframes = w.getnframes()
+
+            if sw != 2:
+                return None
+
+            window = max(1, int(fr / rate_hz))
+            levels = []
+
+            read = 0
+            while read < nframes:
+                data = w.readframes(window)
+                if not data:
+                    break
+
+                a = array.array("h")
+                a.frombytes(data)
+
+                if len(a) == 0:
+                    levels.append(0.0)
+                    continue
+
+                ssum = 0.0
+                for v in a:
+                    fv = float(v) / 32768.0
+                    ssum += fv * fv
+
+                rms = math.sqrt(ssum / len(a))
+                levels.append(max(0.0, min(1.0, rms)))
+
+                read += window
+
+            return levels
+
+    except Exception:
+        return None
 
 def play_file(path: Path) -> None:
     if not path.exists():
@@ -823,6 +876,56 @@ def main() -> None:
                         current_proc = p
                         playback_state = "playing"
 
+                    level_thread = None
+                    level_env_tmp: Path | None = None
+
+                    if HINT_AUDIO_LEVEL_ENABLED:
+                        env_path = path
+
+                        # Minimal MP3 support: decode a temporary WAV for envelope analysis.
+                        if path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
+                            try:
+                                level_env_tmp = AUDIO_CACHE_DIR / f"env-{int(time.time() * 1000)}.wav"
+                                res = subprocess.run(
+                                    ["mpg123", "-q", "-w", str(level_env_tmp), str(path)],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                )
+                                if res.returncode == 0 and level_env_tmp.exists():
+                                    env_path = level_env_tmp
+                                else:
+                                    env_path = None
+                            except Exception:
+                                env_path = None
+
+                        if env_path is not None and env_path.suffix.lower() in {".wav", ".wave"}:
+                            levels = compute_rms_envelope(env_path, HINT_AUDIO_LEVEL_RATE_HZ)
+                        else:
+                            levels = None
+
+                        if levels:
+
+                            def emit_levels():
+                                prev = 0.0
+                                interval = 1.0 / HINT_AUDIO_LEVEL_RATE_HZ
+                                alpha = HINT_AUDIO_LEVEL_SMOOTHING
+
+                                publish_audio_level(0.0, True, cid, jtype)
+
+                                for v in levels:
+                                    if cancel_event.is_set() or p.poll() is not None:
+                                        break
+
+                                    prev = alpha * v + (1 - alpha) * prev
+                                    publish_audio_level(prev, True, cid, jtype)
+                                    time.sleep(interval)
+
+                                publish_audio_level(0.0, False, cid, jtype)
+
+                            level_thread = threading.Thread(target=emit_levels, daemon=True)
+                            level_thread.start()
+
                     # If cancel came in during the small window between job start and spawn,
                     # stop immediately and treat as cancelled.
                     if cancel_event.is_set():
@@ -831,6 +934,18 @@ def main() -> None:
                         _kill_proc(p)
 
                     rc, out, err = _wait_player(p, timeout_sec=SPEAK_PLAY_TIMEOUT_SEC)
+
+                    if level_thread is not None:
+                        try:
+                            level_thread.join(timeout=1.0)
+                        except Exception:
+                            pass
+
+                    if level_env_tmp is not None:
+                        try:
+                            level_env_tmp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
 
                     # If cancelled, stop trying fallbacks.
                     if cancel_event.is_set() or playback_state == "stopping":
@@ -876,6 +991,11 @@ def main() -> None:
 
                 if was_cancelled:
                     # Clean cancellation outcome (not an error)
+                    try:
+                        publish_audio_level(0.0, False, cid, jtype)
+                    except Exception:
+                        pass
+
                     details = {
                         "cancelled": True,
                         "rc": rc,
@@ -964,6 +1084,33 @@ def main() -> None:
         clean_session=True,
         protocol=mqtt.MQTTv311,
     )
+
+    # derive audio level topic
+    if "/" in state_t:
+        audio_level_t = state_t.rsplit("/",1)[0] + "/audio_level"
+    else:
+        audio_level_t = "audio_level"
+
+    def publish_audio_level(level, playing, cid, source):
+        if not HINT_AUDIO_LEVEL_ENABLED:
+            return
+
+        if level < HINT_AUDIO_LEVEL_FLOOR:
+            level = 0.0
+
+        payload = {
+            "device_id": device_id,
+            "level": level,
+            "playing": playing,
+            "command_id": cid,
+            "source": source,
+            "ts": time.time()
+        }
+
+        try:
+            c.publish(audio_level_t, json.dumps(payload), qos=0, retain=False)
+        except Exception:
+            pass
 
     # Last Will: mark offline if we disappear
     will_payload = {"device_id": device_id, "status": "OFFLINE", "ts": int(time.time())}
