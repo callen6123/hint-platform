@@ -1086,13 +1086,10 @@ def main() -> None:
     )
 
     # derive audio level topic
-    # if "/" in state_t:
-    #     audio_level_t = state_t.rsplit("/",1)[0] + "/audio_level"
-    # else:
-    #     audio_level_t = "audio_level"
-# ***************** REMOVE AFTER TEST ******************
-    audio_level_t = state_t
-    # *******************************************************
+    if "/" in state_t:
+        audio_level_t = state_t.rsplit("/",1)[0] + "/audio_level"
+    else:
+        audio_level_t = "audio_level"
     
     def publish_audio_level(level, playing, cid, source):
         if not HINT_AUDIO_LEVEL_ENABLED:
