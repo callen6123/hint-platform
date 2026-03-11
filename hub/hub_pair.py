@@ -690,6 +690,7 @@ user {username}
 topic read {base}/cmd
 topic write {base}/ack
 topic write {base}/state
+topic write {base}/audio/level
 """
 
     # Append only if this user is not already present

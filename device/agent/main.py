@@ -79,6 +79,7 @@ HINT_AUDIO_LEVEL_SMOOTHING = float(os.environ.get("HINT_AUDIO_LEVEL_SMOOTHING", 
 HINT_AUDIO_LEVEL_SMOOTHING = max(0.0, min(HINT_AUDIO_LEVEL_SMOOTHING, 1.0))
 HINT_AUDIO_LEVEL_FLOOR = float(os.environ.get("HINT_AUDIO_LEVEL_FLOOR", "0.03"))
 HINT_AUDIO_LEVEL_FLOOR = max(0.0, min(HINT_AUDIO_LEVEL_FLOOR, 0.5))
+HINT_AUDIO_LEVEL_TOPIC_OVERRIDE = os.environ.get("HINT_AUDIO_LEVEL_TOPIC_OVERRIDE", "").strip() or None
 
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
@@ -1085,11 +1086,14 @@ def main() -> None:
         protocol=mqtt.MQTTv311,
     )
 
-    # derive audio level topic
-    if "/" in state_t:
-        audio_level_t = state_t.rsplit("/",1)[0] + "/audio_level"
+    # Derive audio level topic from the device state topic unless overridden.
+    # Example: site/demo/device/<id>/state -> site/demo/device/<id>/audio/level
+    if HINT_AUDIO_LEVEL_TOPIC_OVERRIDE:
+        audio_level_t = HINT_AUDIO_LEVEL_TOPIC_OVERRIDE
+    elif "/" in state_t:
+        audio_level_t = state_t.rsplit("/", 1)[0] + "/audio/level"
     else:
-        audio_level_t = "audio_level"
+        audio_level_t = "audio/level"
     
     def publish_audio_level(level, playing, cid, source):
         if not HINT_AUDIO_LEVEL_ENABLED:
