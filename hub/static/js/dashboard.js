@@ -1016,8 +1016,26 @@ async function loadAudioStatus(){
   if ($("mqttCopyTopicBtn")) {
     $("mqttCopyTopicBtn").addEventListener('click', async () => {
       const topic = buildAudioTopic($("mqttDeviceSelect") ? $("mqttDeviceSelect").value : '');
+      if (!$("mqttDeviceSelect") || !$("mqttDeviceSelect").value) {
+        if ($("mqttCopyMsg")) $("mqttCopyMsg").textContent = 'Select a device first';
+        return;
+      }
       try {
-        await navigator.clipboard.writeText(topic);
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(topic);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = topic;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'absolute';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          ta.setSelectionRange(0, ta.value.length);
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          if (!ok) throw new Error('execCommand copy failed');
+        }
         if ($("mqttCopyMsg")) $("mqttCopyMsg").textContent = 'Copied';
       } catch (err) {
         if ($("mqttCopyMsg")) $("mqttCopyMsg").textContent = 'Copy failed';
