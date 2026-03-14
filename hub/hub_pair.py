@@ -686,12 +686,12 @@ def ensure_acl(device_id: str, username: str) -> None:
     base = f"site/demo/device/{device_id}"
 
     block = f"""
-user {username}
-topic read {base}/cmd
-topic write {base}/ack
-topic write {base}/state
-topic write {base}/audio/level
-"""
+        user {username}
+        topic read {base}/cmd
+        topic write {base}/ack
+        topic write {base}/state
+        topic write {base}/audio/level
+        """
 
     # Append only if this user is not already present
     if os.path.exists(acl_file):
