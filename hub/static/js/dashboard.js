@@ -329,6 +329,55 @@ async function loadAudioStatus(){
     return `<span class="pill">${esc(text)}</span>`;
   }
 
+    function buildAudioTopic(deviceId){
+    const did = String(deviceId || '').trim();
+    return did ? `site/demo/device/${did}/audio/level` : 'site/demo/device/<device_id>/audio/level';
+  }
+
+  function renderMqttPanelFromStatus(data){
+    const sel = $("mqttDeviceSelect");
+    const topicEl = $("mqttTopicValue");
+    const copyMsg = $("mqttCopyMsg");
+    const copyBtn = $("mqttCopyTopicBtn");
+    if (!sel || !topicEl || !copyBtn) return;
+
+    const rows = Array.isArray(data && data.devices) ? data.devices : [];
+    const current = sel.value || '';
+
+    const options = rows
+      .map((rec) => {
+        const did = String((rec && rec.device_id) || '').trim();
+        if (!did) return null;
+        const label = String((rec && (rec.friendly_name || rec.device_name || rec.device_id)) || did).trim() || did;
+        return { did, label };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.label.localeCompare(b.label) || a.did.localeCompare(b.did));
+
+    sel.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = options.length ? '-- select device --' : '-- no devices --';
+    sel.appendChild(placeholder);
+
+    for (const opt of options) {
+      const el = document.createElement('option');
+      el.value = opt.did;
+      el.textContent = opt.label;
+      el.dataset.deviceId = opt.did;
+      sel.appendChild(el);
+    }
+
+    if (current && options.some(o => o.did === current)) {
+      sel.value = current;
+    } else if (!sel.value && options.length === 1) {
+      sel.value = options[0].did;
+    }
+
+    topicEl.textContent = buildAudioTopic(sel.value);
+    if (copyMsg) copyMsg.textContent = '';
+  }
+
   function renderStatusPanel(data){
     if (!statusTbody) return;
 
@@ -752,6 +801,7 @@ async function loadAudioStatus(){
 
       render(devices, otaLatest);
       renderStatusPanel(data);
+      renderMqttPanelFromStatus(data);
     } catch (e) {
       renderBanner(null);
       render([]);
@@ -953,6 +1003,27 @@ async function loadAudioStatus(){
 
   const refreshBtn = $("refresh");
   if (refreshBtn) refreshBtn.addEventListener('click', refresh);
+
+    if ($("mqttDeviceSelect")) {
+    $("mqttDeviceSelect").addEventListener('change', () => {
+      if ($("mqttTopicValue")) {
+        $("mqttTopicValue").textContent = buildAudioTopic($("mqttDeviceSelect").value);
+      }
+      if ($("mqttCopyMsg")) $("mqttCopyMsg").textContent = '';
+    });
+  }
+
+  if ($("mqttCopyTopicBtn")) {
+    $("mqttCopyTopicBtn").addEventListener('click', async () => {
+      const topic = buildAudioTopic($("mqttDeviceSelect") ? $("mqttDeviceSelect").value : '');
+      try {
+        await navigator.clipboard.writeText(topic);
+        if ($("mqttCopyMsg")) $("mqttCopyMsg").textContent = 'Copied';
+      } catch (err) {
+        if ($("mqttCopyMsg")) $("mqttCopyMsg").textContent = 'Copy failed';
+      }
+    });
+  }
 
     if (friendlyNameInput) {
     friendlyNameInput.addEventListener('input', () => {

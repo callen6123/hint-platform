@@ -180,14 +180,24 @@
 
     <div class="panel" id="mqttHelpPanel">
       <h3>MQTT Integration</h3>
-      <div class="kv">
+
+      <div class="controls" style="gap:10px; flex-wrap:wrap; align-items:end;">
+        <label>Device
+          <select id="mqttDeviceSelect"></select>
+        </label>
+        <button id="mqttCopyTopicBtn" type="button">Copy Topic</button>
+        <span class="muted small" id="mqttCopyMsg"></span>
+      </div>
+
+      <div class="kv" style="margin-top:10px;">
         <div><span class="muted">Broker:</span> <span><code>hinthub.local</code></span></div>
         <div><span class="muted">Port:</span> <span><code>1883</code></span></div>
-        <div><span class="muted">Topic pattern:</span> <span><code>site/demo/device/&lt;device_id&gt;/audio/level</code></span></div>
+        <div><span class="muted">Topic:</span> <span><code id="mqttTopicValue">site/demo/device/&lt;device_id&gt;/audio/level</code></span></div>
       </div>
+
       <div class="muted small" style="margin-top:8px; line-height:1.5;">
-        Subscribe to the exact topic for the device you want to drive. Replace
-        <code>&lt;device_id&gt;</code> with the device ID shown in the Status table above.
+        Select a device to see the exact MQTT topic for that device’s audio amplitude stream.
+        Friendly device names are shown in the dropdown, but the topic always uses the actual device ID.
       </div>
     </div>
 
