@@ -25,6 +25,7 @@ USE_DHCP = False
 STATIC_IP = ("192.168.50.20", "255.255.255.0", "0.0.0.0", "0.0.0.0")
 
 # W55RP20-EVB-Pico Ethernet pins (from wiznet_init defaults)
+
 ETH_SPI_ID = 0
 ETH_SCK_PIN = 21
 ETH_MOSI_PIN = 23

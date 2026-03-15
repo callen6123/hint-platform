@@ -64,6 +64,11 @@ ADMIN_FIELDS_HTML = """
 <input name=\"admin_pass\" type=\"password\" style=\"width:100%;padding:10px\" required><br><br>
 """
 
+SITE_FIELDS_HTML = """
+<h3>Site</h3>
+<label>Site Name</label><br>
+<input name=\"site_name\" style=\"width:100%;padding:10px\" value=\"demo\" required><br><br>
+"""
 
 def sh(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
@@ -122,6 +127,30 @@ def write_env_file(path: str, env: dict[str, str]) -> None:
     sh(["sudo", "cp", tmp, path])
     sh(["sudo", "chown", "root:root", path])
     sh(["sudo", "chmod", "600", path])
+
+
+def normalize_site_id(site_name: str) -> str:
+    """Convert a human-entered site name into a safe site ID.
+
+    Examples:
+      "My Escape Room" -> "my-escape-room"
+      "St. Louis #2"   -> "st-louis-2"
+    """
+    raw = (site_name or "").strip().lower()
+    out_chars: list[str] = []
+    prev_dash = False
+
+    for ch in raw:
+        if ch.isalnum():
+            out_chars.append(ch)
+            prev_dash = False
+        else:
+            if not prev_dash:
+                out_chars.append("-")
+                prev_dash = True
+
+    site_id = "".join(out_chars).strip("-")
+    return site_id or "demo"
 
 
 def nmcli(*args: str) -> str:
@@ -306,14 +335,14 @@ def render_index_html(wired: bool) -> str:
             "Ethernet detected (DHCP active). You can provision the hub without entering Wi-Fi. "
             "If you want the hub to use Wi-Fi instead, unplug Ethernet and refresh."
         )
-        wifi_fields = ""
+        wifi_fields = SITE_FIELDS_HTML
     else:
         note = (
             "Connect your phone/laptop to Wi-Fi <b>HintHub-SETUP</b> (password <b>hintsetup123</b>). "
             "Your phone may open the setup page automatically; if not, open your browser and visit the gateway IP "
             "(often <b>10.42.0.1</b>)."
         )
-        wifi_fields = WIFI_FIELDS_HTML
+        wifi_fields = SITE_FIELDS_HTML + WIFI_FIELDS_HTML
 
     return HTML_TEMPLATE.format(connection_note=note, wifi_fields=wifi_fields, admin_fields=ADMIN_FIELDS_HTML)
 
@@ -326,12 +355,16 @@ def index():
 
 @app.post("/submit")
 def submit():
+    site_name = request.form.get("site_name", "").strip()
     ssid = request.form.get("ssid", "").strip()
     psk = request.form.get("psk", "").strip()
     admin_user = request.form.get("admin_user", "").strip()
     admin_pass = request.form.get("admin_pass", "").strip()
 
     wired = has_ipv4("eth0")
+
+    if not site_name:
+        return "Missing site name", 400
 
     if not admin_user or not admin_pass:
         return "Missing admin credentials", 400
@@ -352,6 +385,9 @@ def submit():
     if "ELEVENLABS_API_KEY" not in env:
         env["ELEVENLABS_API_KEY"] = ""
 
+    site_id = normalize_site_id(site_name)
+
+    env["HUB_SITE_ID"] = site_id
     env["HINT_UI_USER"] = admin_user
     env["HINT_UI_PASS"] = admin_pass
 
@@ -371,6 +407,10 @@ def submit():
     provision = {
         "ok": True,
         "provisioned": True,
+        "site": {
+            "name": site_name,
+            "id": site_id,
+        },
         "network": {"mode": "wired" if wired else "wifi", "ssid": ssid if not wired else None},
         "hostname": DESIRED_HOSTNAME,
         "ts": int(time.time()),

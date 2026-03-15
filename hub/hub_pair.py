@@ -104,6 +104,14 @@ HUB_BASE_URL = os.environ.get("HUB_BASE_URL", "http://hinthub.local:5000")
 
 PAIR_CODE = "483921"  # you will type this into the device setup page
 
+
+def sanitize_topic_id(s: str) -> str:
+    # Keep MQTT topic segments simple and safe
+    return "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in s)[:64]
+
+
+DEFAULT_SITE_ID = sanitize_topic_id((os.environ.get("HUB_SITE_ID") or "demo").strip() or "demo")
+
 REGISTRY_DIR = Path("/var/lib/hint")
 REGISTRY_PATH = REGISTRY_DIR / "devices.json"
 UI_CONFIG_PATH = REGISTRY_DIR / "ui_config.json"
@@ -634,7 +642,7 @@ def _advance_rollout(job: dict, reg: dict) -> None:
         if not isinstance(rec, dict):
             failed[did] = {"status": "error", "error": "missing_registry"}
             continue
-        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
         cid = sanitize_topic_id(f"{job['id']}-{did}")
         try:
             publish_update(site_id, did, cid)
@@ -661,9 +669,6 @@ def _advance_rollout(job: dict, reg: dict) -> None:
             job["finished_at"] = utc_now_iso()
             return
 
-def sanitize_topic_id(s: str) -> str:
-    # Keep MQTT topic segments simple and safe
-    return "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in s)[:64]
 
 
 def gen_password(length: int = 24) -> str:
@@ -683,7 +688,7 @@ def ensure_mqtt_user(username: str, password: str) -> None:
 
 def ensure_acl(device_id: str, username: str) -> None:
     acl_file = "/etc/mosquitto/hint/acl"
-    base = f"site/demo/device/{device_id}"
+    base = f"site/{DEFAULT_SITE_ID}/device/{device_id}"
 
     block = f"""
         user {username}
@@ -1062,7 +1067,7 @@ def pair_complete():
         return jsonify({"ok": False, "error": "Invalid pairing code"}), 401
 
     device_id = sanitize_topic_id(data.get("device_id") or "device")
-    topic_base = f"site/demo/device/{device_id}"
+    topic_base = f"site/{DEFAULT_SITE_ID}/device/{device_id}"
 
     # Generate per-device MQTT credentials
     mqtt_user = f"dev_{device_id}"
@@ -1076,11 +1081,11 @@ def pair_complete():
     restart_mosquitto()
 
 
-    upsert_device(device_id=device_id, site_id="demo", mqtt_user=mqtt_user, ota_token=ota_token)
+    upsert_device(device_id=device_id, site_id=DEFAULT_SITE_ID, mqtt_user=mqtt_user, ota_token=ota_token)
 
     return jsonify({
         "ok": True,
-        "site_id": "demo",
+        "site_id": DEFAULT_SITE_ID,
         "device_id": device_id,
         "mqtt": {
             "host": "hinthub.local",
@@ -1894,7 +1899,7 @@ def fleet_update():
             skipped.append(did)
             continue
 
-        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
         recent = _rec_recent_ids(rec)
         if command_id in recent:
@@ -1978,7 +1983,7 @@ def fleet_build_and_update():
             skipped.append(did)
             continue
 
-        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
         recent = _rec_recent_ids(rec)
         if command_id in recent:
@@ -2192,7 +2197,7 @@ def ui_device_volume_set():
     if not isinstance(rec, dict):
         return jsonify({"ok": False, "error": "unknown_device"}), 404
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
     # Optional command metadata
     command_id = sanitize_topic_id(body.get("command_id") or f"vol-{device_id}-{int(time.time())}")
@@ -2386,7 +2391,7 @@ def ui_cancel():
     if not isinstance(rec, dict):
         return jsonify({"ok": False, "error": "unknown_device"}), 404
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
     command_id = sanitize_topic_id(body.get("command_id") or f"cancel-{device_id}-{int(time.time())}")
     ttl_sec = body.get("ttl_sec")
@@ -2441,7 +2446,7 @@ def ui_speak_stop():
     if not isinstance(rec, dict):
         return jsonify({"ok": False, "error": "unknown_device"}), 404
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
     command_id = sanitize_topic_id(body.get("command_id") or f"cancel-{device_id}-{int(time.time())}")
     ttl_sec = body.get("ttl_sec")
@@ -2497,7 +2502,7 @@ def ui_beep():
     if not isinstance(rec, dict):
         return jsonify({"ok": False, "error": "unknown_device"}), 404
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
     command_id = sanitize_topic_id(body.get("command_id") or f"beep-{device_id}-{int(time.time())}")
     ttl_sec = body.get("ttl_sec")
@@ -2792,7 +2797,7 @@ def ui_saved_audio_play():
     if not isinstance(rec, dict):
         return jsonify({"ok": False, "error": "unknown_device"}), 404
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
     ota_token = str(rec.get("ota_token") or "")
     if not ota_token:
         return jsonify({"ok": False, "error": "missing_ota_token"}), 500
@@ -2879,7 +2884,7 @@ def ui_speak():
     if not isinstance(rec, dict):
         return jsonify({"ok": False, "error": "unknown_device"}), 404
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
     ota_token = str(rec.get("ota_token") or "")
     if not ota_token:
         return jsonify({"ok": False, "error": "missing_ota_token"}), 500
@@ -3285,7 +3290,7 @@ def ui_speak_retry():
     if not audio_id:
         return jsonify({"ok": False, "error": "no_last_speak_audio_id"}), 400
 
-    site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
     ota_token = str(rec.get("ota_token") or "").strip()
     if not ota_token:
         return jsonify({"ok": False, "error": "missing_ota_token"}), 500
@@ -3600,7 +3605,7 @@ def ui_status():
                 if next_state and next_state != prev_state:
                     _append_hub_cmd_log({
                         "event": "speak_state",
-                        "site_id": str(rec.get("site_id") or "demo"),
+                        "site_id": str(rec.get("site_id") or DEFAULT_SITE_ID),
                         "device_id": str(rec.get("device_id") or device_id),
                         "command_id": str(new_ls.get("command_id") or ""),
                         "audio_id": str(new_ls.get("audio_id") or ""),
@@ -3745,7 +3750,7 @@ def ui_update():
             skipped.append(did)
             continue
 
-        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
         recent = _rec_recent_ids(rec)
         if command_id in recent:
@@ -3811,7 +3816,7 @@ def ui_build_and_update():
             skipped.append(did)
             continue
 
-        site_id = sanitize_topic_id(str(rec.get("site_id") or "demo"))
+        site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
 
         recent = _rec_recent_ids(rec)
         if command_id in recent:
@@ -4070,7 +4075,7 @@ def dashboard():
     ar = require_ui_admin()
     if ar is not None:
         return ar
-    return render_template("dashboard.html")
+    return render_template("dashboard.html", site_id=DEFAULT_SITE_ID)
 
 
 if __name__ == "__main__":
@@ -4090,7 +4095,7 @@ if __name__ == "__main__":
     try:
         _append_hub_cmd_log({
             "event": "ack_received",
-            "site_id": str(rec.get("site_id") or "demo"),
+            "site_id": str(rec.get("site_id") or DEFAULT_SITE_ID),
             "device_id": str(rec.get("device_id") or device_id),
             "command_id": str((rec.get("last_ack") or {}).get("command_id") or ""),
             "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},
@@ -4122,7 +4127,7 @@ def handle_inbound_mqtt_message(topic: str, payload: dict, reg: dict):
         try:
             _append_hub_cmd_log({
                 "event": "ack_received",
-                "site_id": str(rec.get("site_id") or "demo"),
+                "site_id": str(rec.get("site_id") or DEFAULT_SITE_ID),
                 "device_id": str(rec.get("device_id") or device_id),
                 "command_id": str((rec.get("last_ack") or {}).get("command_id") or ""),
                 "ack": rec.get("last_ack") if isinstance(rec.get("last_ack"), dict) else {},

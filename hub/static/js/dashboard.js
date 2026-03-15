@@ -331,7 +331,9 @@ async function loadAudioStatus(){
 
     function buildAudioTopic(deviceId){
     const did = String(deviceId || '').trim();
-    return did ? `site/demo/device/${did}/audio/level` : 'site/demo/device/<device_id>/audio/level';
+    return did
+      ? `site/${(window.HUB_SITE_ID || 'demo')}/device/${did}/audio/level`
+      : `site/${(window.HUB_SITE_ID || 'demo')}/device/<device_id>/audio/level`;
   }
 
   function renderMqttPanelFromStatus(data){
