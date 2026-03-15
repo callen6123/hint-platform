@@ -35,35 +35,35 @@ ETH_RST_PIN = 25
 # WS2812 settings
 INNER_LED_PIN = 15              # reactive inner ring
 INNER_LED_COUNT = 10
-INNER_LED_BRIGHTNESS = 0.95     # overall cap, 0.0 to 1.0
+INNER_LED_BRIGHTNESS = 1.0      # make the inner sync ring as prominent as possible
 
 OUTER_LED_PIN = 13              # pulsing outer ring
 OUTER_LED_COUNT = 12
-OUTER_LED_BRIGHTNESS = 0.25
+OUTER_LED_BRIGHTNESS = 0.09     # keep the outer ring visibly red but secondary to the center
 
 # LED color for audio pulse
-INNER_BASE_COLOR = (253, 80, 10)
-OUTER_BASE_COLOR = (180, 0, 0)
+INNER_BASE_COLOR = (255, 170, 35)   # bright orange-yellow center glow
+OUTER_BASE_COLOR = (255, 0, 0)      # pure red outer ring
 IDLE_COLOR = (0, 0, 0)
 
 # Audio / sync tuning
 NOISE_FLOOR = 0.02
 AUTO_OFF_MS = 120
-LEVEL_SMOOTHING = 0.28
-FADE_UP_RATE = 0.27
-FADE_DOWN_RATE = 0.14
-MIN_FLASH_BRIGHTNESS = 0.05
-OUTER_PULSE_MIN = 0.02
-OUTER_PULSE_MAX = 1.0
+LEVEL_SMOOTHING = 0.20
+FADE_UP_RATE = 0.25
+FADE_DOWN_RATE = 0.18
+MIN_FLASH_BRIGHTNESS = 0.08
+OUTER_PULSE_MIN = 0.10
+OUTER_PULSE_MAX = 0.75
 OUTER_PULSE_SPEED = 0.04   # slower, more ominous breathing pulse
 
 # Adaptive peak logic, similar to mouth servo version
 PEAK_MIN = 0.04
 PEAK_DECAY = 0.90
-TRIGGER_FRAC = 0.60
-RISE_DELTA = 0.011
-FLASH_HOLD_MS = 115
-FLASH_REFRACTORY_MS = 125
+TRIGGER_FRAC = 0.54
+RISE_DELTA = 0.012
+FLASH_HOLD_MS = 120
+FLASH_REFRACTORY_MS = 120
 
 # =========================
 # GLOBAL STATE
