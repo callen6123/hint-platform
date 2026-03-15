@@ -1,4 +1,5 @@
 import time
+import math
 import json
 import machine
 import network
@@ -32,29 +33,37 @@ ETH_CS_PIN = 20
 ETH_RST_PIN = 25
 
 # WS2812 settings
-LED_PIN = 15              # change if needed
-LED_COUNT = 30
-LED_BRIGHTNESS = 0.75     # overall cap, 0.0 to 1.0
+INNER_LED_PIN = 15              # reactive inner ring
+INNER_LED_COUNT = 10
+INNER_LED_BRIGHTNESS = 0.95     # overall cap, 0.0 to 1.0
+
+OUTER_LED_PIN = 13              # pulsing outer ring
+OUTER_LED_COUNT = 12
+OUTER_LED_BRIGHTNESS = 0.25
 
 # LED color for audio pulse
-BASE_COLOR = (253, 10, 0)   
+INNER_BASE_COLOR = (253, 80, 10)
+OUTER_BASE_COLOR = (180, 0, 0)
 IDLE_COLOR = (0, 0, 0)
 
 # Audio / sync tuning
 NOISE_FLOOR = 0.02
 AUTO_OFF_MS = 120
-LEVEL_SMOOTHING = 0.35
-FADE_UP_RATE = 0.35
-FADE_DOWN_RATE = 0.18
-MIN_FLASH_BRIGHTNESS = 0.08
+LEVEL_SMOOTHING = 0.28
+FADE_UP_RATE = 0.27
+FADE_DOWN_RATE = 0.14
+MIN_FLASH_BRIGHTNESS = 0.05
+OUTER_PULSE_MIN = 0.02
+OUTER_PULSE_MAX = 1.0
+OUTER_PULSE_SPEED = 0.04   # slower, more ominous breathing pulse
 
 # Adaptive peak logic, similar to mouth servo version
 PEAK_MIN = 0.04
 PEAK_DECAY = 0.90
-TRIGGER_FRAC = 0.54
-RISE_DELTA = 0.008
-FLASH_HOLD_MS = 90
-FLASH_REFRACTORY_MS = 100
+TRIGGER_FRAC = 0.60
+RISE_DELTA = 0.011
+FLASH_HOLD_MS = 115
+FLASH_REFRACTORY_MS = 125
 
 # =========================
 # GLOBAL STATE
@@ -70,12 +79,14 @@ last_msg_ms = time.ticks_ms()
 client = None
 last_ping_ms = time.ticks_ms()
 display_level = 0.0
+outer_phase = 0.0
 
 # =========================
 # LED HELPERS
 # =========================
 
-np = neopixel.NeoPixel(machine.Pin(LED_PIN), LED_COUNT)
+inner_np = neopixel.NeoPixel(machine.Pin(INNER_LED_PIN), INNER_LED_COUNT)
+outer_np = neopixel.NeoPixel(machine.Pin(OUTER_LED_PIN), OUTER_LED_COUNT)
 
 def scale_color(color, brightness):
     brightness = max(0.0, min(1.0, brightness))
@@ -85,17 +96,17 @@ def scale_color(color, brightness):
         int(color[2] * brightness),
     )
 
-def set_all(color):
-    for i in range(LED_COUNT):
-        np[i] = color
-    np.write()
+def set_all(strip, count, color):
+    for i in range(count):
+        strip[i] = color
+    strip.write()
 
-def set_all_scaled(color, level):
+def set_all_scaled(strip, count, color, brightness_cap, level):
     level = max(0.0, min(1.0, level))
-    scaled = scale_color(color, LED_BRIGHTNESS * level)
-    for i in range(LED_COUNT):
-        np[i] = scaled
-    np.write()
+    scaled = scale_color(color, brightness_cap * level)
+    for i in range(count):
+        strip[i] = scaled
+    strip.write()
 
 
 def smooth_display_level(current_level, target_level, active):
@@ -106,6 +117,23 @@ def smooth_display_level(current_level, target_level, active):
         return current_level + ((target - current_level) * FADE_DOWN_RATE)
 
     return current_level * (1.0 - FADE_DOWN_RATE)
+
+def update_outer_pulse():
+    global outer_phase
+
+    outer_phase += OUTER_PULSE_SPEED
+
+    # keep phase bounded so it doesn't grow forever
+    if outer_phase > math.tau:
+        outer_phase -= math.tau
+
+    # sine wave scaled to 0–1
+    sine_val = (math.sin(outer_phase) + 1) / 2
+
+    # map into configured brightness range
+    level = OUTER_PULSE_MIN + (sine_val * (OUTER_PULSE_MAX - OUTER_PULSE_MIN))
+
+    return level
 
 # =========================
 # MQTT CALLBACK
@@ -243,7 +271,8 @@ def update_flash_state(level, age_ms, now_ms):
 def main():
     global last_ping_ms, display_level
 
-    set_all(IDLE_COLOR)
+    set_all(inner_np, INNER_LED_COUNT, IDLE_COLOR)
+    set_all(outer_np, OUTER_LED_COUNT, IDLE_COLOR)
 
     nic = connect_ethernet()
     connect_mqtt()
@@ -267,7 +296,7 @@ def main():
 
         except Exception as e:
             print("MQTT error, reconnecting:", e)
-            set_all(IDLE_COLOR)
+            set_all(inner_np, INNER_LED_COUNT, IDLE_COLOR)
             time.sleep_ms(1000)
             try:
                 connect_mqtt()
@@ -284,11 +313,14 @@ def main():
         smoothed_level = display_level + ((level - display_level) * LEVEL_SMOOTHING)
         display_level = smooth_display_level(display_level, smoothed_level, active)
 
+        outer_level = update_outer_pulse()
+        set_all_scaled(outer_np, OUTER_LED_COUNT, OUTER_BASE_COLOR, OUTER_LED_BRIGHTNESS, outer_level)
+
         if display_level < 0.01:
             display_level = 0.0
-            set_all(IDLE_COLOR)
+            set_all(inner_np, INNER_LED_COUNT, IDLE_COLOR)
         else:
-            set_all_scaled(BASE_COLOR, display_level)
+            set_all_scaled(inner_np, INNER_LED_COUNT, INNER_BASE_COLOR, INNER_LED_BRIGHTNESS, display_level)
 
         time.sleep_ms(20)
 
