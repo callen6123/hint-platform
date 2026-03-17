@@ -39,10 +39,10 @@ def set_servo_deg(channel, deg):
 print("Starting narrow servo sweep")
 
 while True:
-    for d in range(47,77):
+    for d in range(52,77):
         set_servo_deg(0,d)
         time.sleep(0.03)
 
-    for d in range(77,47,-1):
+    for d in range(77,52,-1):
         set_servo_deg(0,d)
         time.sleep(0.03)

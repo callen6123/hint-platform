@@ -42,7 +42,7 @@ SERVO_CHANNEL = 0
 
 # Mouth tuning
 SERVO_CLOSED_DEG = 77
-SERVO_OPEN_DEG = 47
+SERVO_OPEN_DEG = 52
 SERVO_IDLE_DEG = 77
 
 NOISE_FLOOR = 0.02          # ignore tiny values
