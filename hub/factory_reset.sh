@@ -26,6 +26,15 @@ echo "[RESET] Clearing Mosquitto retained/persistent state..."
 rm -f /var/lib/mosquitto/mosquitto.db
 rm -f /var/lib/mosquitto/*.db
 
+echo "[RESET] Resetting Mosquitto ACLs..."
+mkdir -p /etc/mosquitto/hint
+cat > /etc/mosquitto/hint/acl <<'EOF'
+user hubadmin
+topic readwrite site/#
+EOF
+chmod 640 /etc/mosquitto/hint/acl
+chown root:root /etc/mosquitto/hint/acl
+
 echo "[RESET] Soft-resetting hub secrets (/etc/hint/hub.env)..."
 if [ -f /etc/hint/hub.env ]; then
   cp /etc/hint/hub.env "/etc/hint/hub.env.bak.$(date +%s)" 2>/dev/null || true
