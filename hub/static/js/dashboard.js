@@ -671,9 +671,9 @@ async function loadAudioStatus(){
       const hd = info.hubHealthDetail;
       const overall = String(hd.ok ? 'ok' : 'error').toLowerCase();
 
-      const checks = (hd.hub_health && hd.hub_health.checks)
-        ? hd.hub_health.checks
-        : null;
+      const checks = (hd.checks && typeof hd.checks === 'object')
+        ? hd.checks
+        : ((hd.hub_health && hd.hub_health.checks) ? hd.hub_health.checks : null);
 
       const mqttOk = (checks && checks.mqtt_tcp && typeof checks.mqtt_tcp.ok === 'boolean')
         ? checks.mqtt_tcp.ok
@@ -798,7 +798,7 @@ async function loadAudioStatus(){
         hubUpd,
         hubErr,
         hubHealth,
-        hubHealthDetail: _hubHealth && (_hubHealth.ok === true || _hubHealth.overall) ? _hubHealth : null,
+        hubHealthDetail: _hubHealth && typeof _hubHealth === 'object' ? _hubHealth : null,
       });
 
       render(devices, otaLatest);
