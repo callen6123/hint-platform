@@ -1,13 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
+
 echo "[RESET] Stopping hub services..."
 systemctl stop hint-hub-pair 2>/dev/null || true
 systemctl stop hint-device-watch 2>/dev/null || true
 systemctl stop hint-hub-setup 2>/dev/null || true
 
+echo "[RESET] Stopping Mosquitto..."
+systemctl stop mosquitto 2>/dev/null || true
+
 echo "[RESET] Removing hub provisioning..."
 rm -f /etc/hint/hub_provision.json
+
 
 echo "[RESET] Removing hub runtime state..."
 rm -f /var/lib/hint/devices.json
@@ -16,6 +21,10 @@ rm -f /var/lib/hint/ui_users.json
 rm -f /var/lib/hint/logs/hub_cmd.log
 rm -rf /var/lib/hint/audio_cache/*
 rm -rf /var/lib/hint/audio_pinned/*
+
+echo "[RESET] Clearing Mosquitto retained/persistent state..."
+rm -f /var/lib/mosquitto/mosquitto.db
+rm -f /var/lib/mosquitto/*.db
 
 echo "[RESET] Soft-resetting hub secrets (/etc/hint/hub.env)..."
 if [ -f /etc/hint/hub.env ]; then
@@ -100,6 +109,10 @@ if command -v nmcli >/dev/null 2>&1; then
 else
   echo "[RESET] nmcli not found; skipping NetworkManager Wi-Fi clearing."
 fi
+
+
+echo "[RESET] Restarting Mosquitto..."
+systemctl start mosquitto >/dev/null 2>&1 || true
 
 echo "[RESET] Re-enabling hub setup service..."
 systemctl enable hint-hub-setup >/dev/null 2>&1 || true
