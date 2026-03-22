@@ -16,8 +16,8 @@ MQTT_PORT = 1883
 MQTT_USER = "hubadmin"
 MQTT_PASS = "devpass123"
 
-MQTT_TOPIC = b"site/demo/device/b17c894acb294400ae81bac3c43882aa/audio/level"
-MQTT_DEBUG = True
+MQTT_TOPIC = b"site/expo/device/8dceb90297ef4884ba7d01207d14d3e9/audio/level"
+MQTT_DEBUG = False
 MQTT_PING_INTERVAL_MS = 10000
 
 # Static IP for the Pico
@@ -281,7 +281,11 @@ def main():
 
     while True:
         try:
-            client.check_msg()
+            for _ in range(8):
+                try:
+                    client.check_msg()
+                except OSError:
+                    break
 
             now_ms = time.ticks_ms()
             if time.ticks_diff(now_ms, last_ping_ms) >= MQTT_PING_INTERVAL_MS:

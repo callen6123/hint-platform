@@ -73,8 +73,8 @@ SCRIPTS_CURRENT = Path("/opt/hint/device_scripts_current")
 
 # Audio amplitude publishing
 HINT_AUDIO_LEVEL_ENABLED = os.environ.get("HINT_AUDIO_LEVEL_ENABLED", "0").lower() in {"1","true","yes"}
-HINT_AUDIO_LEVEL_RATE_HZ = float(os.environ.get("HINT_AUDIO_LEVEL_RATE_HZ", "25"))
-HINT_AUDIO_LEVEL_RATE_HZ = max(5.0, min(HINT_AUDIO_LEVEL_RATE_HZ, 60.0))
+HINT_AUDIO_LEVEL_RATE_HZ = float(os.environ.get("HINT_AUDIO_LEVEL_RATE_HZ", "12"))
+HINT_AUDIO_LEVEL_RATE_HZ = max(5.0, min(HINT_AUDIO_LEVEL_RATE_HZ, 30.0))
 HINT_AUDIO_LEVEL_SMOOTHING = float(os.environ.get("HINT_AUDIO_LEVEL_SMOOTHING", "0.35"))
 HINT_AUDIO_LEVEL_SMOOTHING = max(0.0, min(HINT_AUDIO_LEVEL_SMOOTHING, 1.0))
 HINT_AUDIO_LEVEL_FLOOR = float(os.environ.get("HINT_AUDIO_LEVEL_FLOOR", "0.03"))
