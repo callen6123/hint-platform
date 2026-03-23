@@ -1,48 +1,38 @@
-import time
-import math
 import json
-import machine
-import network
-import neopixel
-from simple import MQTTClient
+import math
+import signal
+import sys
+import threading
+import time
+from typing import Any
+
+import paho.mqtt.client as mqtt
+from rpi_ws281x import Color, PixelStrip
 
 # =========================
 # USER CONFIG
 # =========================
 
-DEVICE_NAME = "led-audio-demo"
-MQTT_BROKER = "192.168.50.1"   # your hub IP
+DEVICE_NAME = "hal-led-pi4"
+MQTT_BROKER = "192.168.50.1"
 MQTT_PORT = 1883
 MQTT_USER = "hubadmin"
 MQTT_PASS = "devpass123"
-
-MQTT_TOPIC = b"site/expo/device/8dceb90297ef4884ba7d01207d14d3e9/audio/level"
+MQTT_TOPIC = "site/expo/device/8dceb90297ef4884ba7d01207d14d3e9/audio/level"
 MQTT_DEBUG = False
-MQTT_PING_INTERVAL_MS = 10000
+MQTT_KEEPALIVE = 120
 
-# Static IP for the Pico
-USE_DHCP = False
-STATIC_IP = ("192.168.50.21", "255.255.255.0", "0.0.0.0", "0.0.0.0")
-
-# W55RP20-EVB-Pico Ethernet pins
-ETH_SPI_ID = 0
-ETH_SCK_PIN = 21
-ETH_MOSI_PIN = 23
-ETH_MISO_PIN = 22
-ETH_CS_PIN = 20
-ETH_RST_PIN = 25
-
-# WS2812 settings
-INNER_LED_PIN = 15              # reactive inner ring
-INNER_LED_COUNT = 10
-INNER_LED_BRIGHTNESS = 1.0      # make the inner sync ring as prominent as possible
+# WS2812 settings (BCM GPIO numbering)
+INNER_LED_PIN = 18              # reactive inner ring
+INNER_LED_COUNT = 12
+INNER_LED_BRIGHTNESS = 255      # 0-255
 
 OUTER_LED_PIN = 13              # pulsing outer ring
-OUTER_LED_COUNT = 12
-OUTER_LED_BRIGHTNESS = 0.09     # keep the outer ring visibly red but secondary to the center
+OUTER_LED_COUNT = 10
+OUTER_LED_BRIGHTNESS = 200       # 0-255
 
 # LED color for audio pulse
-INNER_BASE_COLOR = (255, 170, 35)   # bright orange-yellow center glow
+INNER_BASE_COLOR = (255, 100, 0)   # bright orange-yellow center glow
 OUTER_BASE_COLOR = (255, 0, 0)      # pure red outer ring
 IDLE_COLOR = (0, 0, 0)
 
@@ -55,9 +45,9 @@ FADE_DOWN_RATE = 0.18
 MIN_FLASH_BRIGHTNESS = 0.08
 OUTER_PULSE_MIN = 0.10
 OUTER_PULSE_MAX = 0.75
-OUTER_PULSE_SPEED = 0.04   # slower, more ominous breathing pulse
+OUTER_PULSE_SPEED = 0.04
 
-# Adaptive peak logic, similar to mouth servo version
+# Adaptive peak logic
 PEAK_MIN = 0.04
 PEAK_DECAY = 0.90
 TRIGGER_FRAC = 0.54
@@ -65,30 +55,45 @@ RISE_DELTA = 0.012
 FLASH_HOLD_MS = 120
 FLASH_REFRACTORY_MS = 120
 
+LOOP_SLEEP_SEC = 0.02
+STALE_PACKET_SEC = 2.0
+
+# WS281x config
+LED_FREQ_HZ = 800000
+LED_DMA = 10
+LED_INVERT = False
+INNER_LED_CHANNEL = 0
+OUTER_LED_CHANNEL = 1
+
 # =========================
 # GLOBAL STATE
 # =========================
 
 latest_level = 0.0
+latest_payload_ts = 0.0
+last_msg_monotonic = time.monotonic()
 flash_active = False
 flash_until_ms = 0
 last_flash_ms = 0
 rolling_peak = PEAK_MIN
 prev_level = 0.0
-last_msg_ms = time.ticks_ms()
-client = None
-last_ping_ms = time.ticks_ms()
+running = True
+state_lock = threading.Lock()
 display_level = 0.0
 outer_phase = 0.0
+
 
 # =========================
 # LED HELPERS
 # =========================
 
-inner_np = neopixel.NeoPixel(machine.Pin(INNER_LED_PIN), INNER_LED_COUNT)
-outer_np = neopixel.NeoPixel(machine.Pin(OUTER_LED_PIN), OUTER_LED_COUNT)
 
-def scale_color(color, brightness):
+def ticks_ms() -> int:
+    return int(time.monotonic() * 1000)
+
+
+
+def scale_color(color: tuple[int, int, int], brightness: float) -> tuple[int, int, int]:
     brightness = max(0.0, min(1.0, brightness))
     return (
         int(color[0] * brightness),
@@ -96,20 +101,32 @@ def scale_color(color, brightness):
         int(color[2] * brightness),
     )
 
-def set_all(strip, count, color):
-    for i in range(count):
-        strip[i] = color
-    strip.write()
 
-def set_all_scaled(strip, count, color, brightness_cap, level):
+
+def rgb_to_color(rgb: tuple[int, int, int]) -> int:
+    return Color(rgb[0], rgb[1], rgb[2])
+
+
+
+def set_all(strip: PixelStrip, color: tuple[int, int, int]) -> None:
+    packed = rgb_to_color(color)
+    for i in range(strip.numPixels()):
+        strip.setPixelColor(i, packed)
+    strip.show()
+
+
+
+def set_all_scaled(strip: PixelStrip, color: tuple[int, int, int], brightness_cap: float, level: float) -> None:
     level = max(0.0, min(1.0, level))
     scaled = scale_color(color, brightness_cap * level)
-    for i in range(count):
-        strip[i] = scaled
-    strip.write()
+    packed = rgb_to_color(scaled)
+    for i in range(strip.numPixels()):
+        strip.setPixelColor(i, packed)
+    strip.show()
 
 
-def smooth_display_level(current_level, target_level, active):
+
+def smooth_display_level(current_level: float, target_level: float, active: bool) -> float:
     if active and target_level > 0.0:
         target = MIN_FLASH_BRIGHTNESS + ((1.0 - MIN_FLASH_BRIGHTNESS) * target_level)
         if target > current_level:
@@ -118,121 +135,77 @@ def smooth_display_level(current_level, target_level, active):
 
     return current_level * (1.0 - FADE_DOWN_RATE)
 
-def update_outer_pulse():
+
+
+def update_outer_pulse() -> float:
     global outer_phase
 
     outer_phase += OUTER_PULSE_SPEED
-
-    # keep phase bounded so it doesn't grow forever
     if outer_phase > math.tau:
         outer_phase -= math.tau
 
-    # sine wave scaled to 0–1
-    sine_val = (math.sin(outer_phase) + 1) / 2
+    sine_val = (math.sin(outer_phase) + 1.0) / 2.0
+    return OUTER_PULSE_MIN + (sine_val * (OUTER_PULSE_MAX - OUTER_PULSE_MIN))
 
-    # map into configured brightness range
-    level = OUTER_PULSE_MIN + (sine_val * (OUTER_PULSE_MAX - OUTER_PULSE_MIN))
-
-    return level
 
 # =========================
-# MQTT CALLBACK
+# MQTT CALLBACKS
 # =========================
 
-def on_message(topic, msg):
-    global latest_level, last_msg_ms
+
+def on_connect(client: mqtt.Client, _userdata: Any, _flags: Any, rc: int, _properties: Any = None) -> None:
+    if rc == 0:
+        client.subscribe(MQTT_TOPIC, qos=0)
+        print(f"MQTT connected, subscribed to: {MQTT_TOPIC}")
+    else:
+        print(f"MQTT connect failed rc={rc}")
+
+
+
+def on_message(_client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
+    global latest_level, latest_payload_ts, last_msg_monotonic
 
     try:
-        if MQTT_DEBUG:
-            print("MQTT RX topic=", topic)
-            print("MQTT RX msg=", msg)
-
-        payload = json.loads(msg)
-        level = float(payload.get("level", 0.0))
+        payload = json.loads(msg.payload.decode("utf-8"))
+        msg_ts = float(payload.get("ts", 0.0) or 0.0)
+        level = float(payload.get("level", 0.0) or 0.0)
         playing = bool(payload.get("playing", False))
 
-        if not playing:
-            level = 0.0
+        if MQTT_DEBUG:
+            print("MQTT RAW topic=", msg.topic)
+            print("MQTT RAW level=", level, "playing=", playing, "ts=", msg_ts, "now=", time.time())
 
-        if level < NOISE_FLOOR:
-            level = 0.0
+        # Temporarily disable stale-packet dropping while debugging.
+        # if msg_ts and msg_ts + STALE_PACKET_SEC < time.time():
+        #     return
 
-        level = max(0.0, min(1.0, level))
-        latest_level = level
-        last_msg_ms = time.ticks_ms()
+        with state_lock:
+            if msg_ts < latest_payload_ts:
+                return
+            latest_payload_ts = msg_ts
 
-    except Exception as e:
-        print("MQTT parse error:", e)
+            if not playing:
+                level = 0.0
+            if level < NOISE_FLOOR:
+                level = 0.0
 
-# =========================
-# NETWORK
-# =========================
+            latest_level = max(0.0, min(1.0, level))
+            last_msg_monotonic = time.monotonic()
 
-def connect_ethernet():
-    print("Initializing Ethernet...")
+        if MQTT_DEBUG:
+            print("MQTT RX topic=", msg.topic)
+            print("MQTT RX level=", latest_level, "playing=", playing, "ts=", msg_ts)
 
-    spi = machine.WIZNET_PIO_SPI(
-        31250000,
-        sck=ETH_SCK_PIN,
-        mosi=ETH_MOSI_PIN,
-        miso=ETH_MISO_PIN,
-    )
-    cs = machine.Pin(ETH_CS_PIN)
-    rst = machine.Pin(ETH_RST_PIN, machine.Pin.OUT)
+    except Exception as exc:
+        print("MQTT parse error:", exc)
 
-    rst.value(0)
-    time.sleep_ms(100)
-    rst.value(1)
-    time.sleep_ms(500)
-
-    print("Creating WIZNET5K interface...")
-    nic = network.WIZNET5K(spi, cs, rst)
-
-    try:
-        nic.active(True)
-    except Exception:
-        pass
-
-    if USE_DHCP:
-        print("Using DHCP...")
-        try:
-            nic.ifconfig("dhcp")
-        except Exception:
-            pass
-
-        t0 = time.ticks_ms()
-        while nic.ifconfig()[0] == "0.0.0.0":
-            if time.ticks_diff(time.ticks_ms(), t0) > 15000:
-                raise RuntimeError("DHCP timeout")
-            time.sleep_ms(250)
-    else:
-        print("Using static IP:", STATIC_IP[0])
-        nic.ifconfig(STATIC_IP)
-
-    print("Ethernet up:", nic.ifconfig())
-    return nic
-
-def connect_mqtt():
-    global client
-
-    client = MQTTClient(
-        client_id=DEVICE_NAME,
-        server=MQTT_BROKER,
-        port=MQTT_PORT,
-        user=MQTT_USER,
-        password=MQTT_PASS,
-        keepalive=120,
-    )
-    client.set_callback(on_message)
-    client.connect()
-    client.subscribe(MQTT_TOPIC)
-    print("MQTT connected, subscribed to:", MQTT_TOPIC)
 
 # =========================
 # LED AUDIO SYNC
 # =========================
 
-def update_flash_state(level, age_ms, now_ms):
+
+def update_flash_state(level: float, age_ms: int, now_ms: int) -> tuple[float, bool]:
     global flash_active, flash_until_ms, last_flash_ms, rolling_peak, prev_level, display_level
 
     if age_ms >= AUTO_OFF_MS:
@@ -251,81 +224,112 @@ def update_flash_state(level, age_ms, now_ms):
 
     trigger_level = rolling_peak * TRIGGER_FRAC
     rising_enough = (level - prev_level) >= RISE_DELTA
-    refractory_done = time.ticks_diff(now_ms, last_flash_ms) >= FLASH_REFRACTORY_MS
+    refractory_done = (now_ms - last_flash_ms) >= FLASH_REFRACTORY_MS
 
     if level >= trigger_level and rising_enough and refractory_done:
         flash_active = True
-        flash_until_ms = time.ticks_add(now_ms, FLASH_HOLD_MS)
+        flash_until_ms = now_ms + FLASH_HOLD_MS
         last_flash_ms = now_ms
 
-    if flash_active and time.ticks_diff(flash_until_ms, now_ms) <= 0:
+    if flash_active and now_ms >= flash_until_ms:
         flash_active = False
 
     prev_level = level
     return level, flash_active
 
+
 # =========================
 # MAIN
 # =========================
 
-def main():
-    global last_ping_ms, display_level
 
-    set_all(inner_np, INNER_LED_COUNT, IDLE_COLOR)
-    set_all(outer_np, OUTER_LED_COUNT, IDLE_COLOR)
+def handle_shutdown(_signum: int, _frame: Any) -> None:
+    global running
+    running = False
 
-    nic = connect_ethernet()
-    connect_mqtt()
 
+
+def build_strip(pin: int, count: int, brightness: int, channel: int) -> PixelStrip:
+    strip = PixelStrip(
+        count,
+        pin,
+        LED_FREQ_HZ,
+        LED_DMA,
+        LED_INVERT,
+        brightness,
+        channel,
+    )
+    strip.begin()
+    return strip
+
+
+
+def build_mqtt_client() -> mqtt.Client:
+    client = mqtt.Client(client_id=DEVICE_NAME, protocol=mqtt.MQTTv311)
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
+    client.loop_start()
+    return client
+
+
+
+def main() -> int:
+    global running, display_level
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+
+    inner_strip = build_strip(INNER_LED_PIN, INNER_LED_COUNT, INNER_LED_BRIGHTNESS, INNER_LED_CHANNEL)
+    outer_strip = build_strip(OUTER_LED_PIN, OUTER_LED_COUNT, OUTER_LED_BRIGHTNESS, OUTER_LED_CHANNEL)
+
+    set_all(inner_strip, IDLE_COLOR)
+    set_all(outer_strip, IDLE_COLOR)
+
+    client = build_mqtt_client()
     print("LED audio sync ready")
 
-    while True:
+    try:
+        while running:
+            with state_lock:
+                level = latest_level
+                age_ms = int((time.monotonic() - last_msg_monotonic) * 1000)
+
+            now_ms = ticks_ms()
+            level, active = update_flash_state(level, age_ms, now_ms)
+
+            smoothed_level = display_level + ((level - display_level) * LEVEL_SMOOTHING)
+            display_level = smooth_display_level(display_level, smoothed_level, active)
+
+            if MQTT_DEBUG and active:
+                print("SYNC active level=", level, "display_level=", display_level, "age_ms=", age_ms)
+
+            outer_level = update_outer_pulse()
+            set_all_scaled(outer_strip, OUTER_BASE_COLOR, 1.0, outer_level)
+
+            if display_level < 0.01:
+                display_level = 0.0
+                set_all(inner_strip, IDLE_COLOR)
+            else:
+                set_all_scaled(inner_strip, INNER_BASE_COLOR, 1.0, display_level)
+
+            time.sleep(LOOP_SLEEP_SEC)
+    finally:
         try:
-            for _ in range(8):
-                try:
-                    client.check_msg()
-                except OSError:
-                    break
+            set_all(inner_strip, IDLE_COLOR)
+            set_all(outer_strip, IDLE_COLOR)
+        except Exception:
+            pass
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:
+            pass
 
-            now_ms = time.ticks_ms()
-            if time.ticks_diff(now_ms, last_ping_ms) >= MQTT_PING_INTERVAL_MS:
-                try:
-                    client.ping()
-                    if MQTT_DEBUG:
-                        print("MQTT ping")
-                except Exception as e:
-                    print("MQTT ping failed:", e)
-                    raise
-                last_ping_ms = now_ms
+    return 0
 
-        except Exception as e:
-            print("MQTT error, reconnecting:", e)
-            set_all(inner_np, INNER_LED_COUNT, IDLE_COLOR)
-            time.sleep_ms(1000)
-            try:
-                connect_mqtt()
-                last_ping_ms = time.ticks_ms()
-            except Exception as e2:
-                print("Reconnect failed:", e2)
-                time.sleep_ms(2000)
-                continue
 
-        now_ms = time.ticks_ms()
-        age = time.ticks_diff(now_ms, last_msg_ms)
-        level, active = update_flash_state(latest_level, age, now_ms)
-
-        smoothed_level = display_level + ((level - display_level) * LEVEL_SMOOTHING)
-        display_level = smooth_display_level(display_level, smoothed_level, active)
-
-        outer_level = update_outer_pulse()
-        set_all_scaled(outer_np, OUTER_LED_COUNT, OUTER_BASE_COLOR, OUTER_LED_BRIGHTNESS, outer_level)
-
-        if display_level < 0.01:
-            display_level = 0.0
-            set_all(inner_np, INNER_LED_COUNT, IDLE_COLOR)
-        else:
-            set_all_scaled(inner_np, INNER_LED_COUNT, INNER_BASE_COLOR, INNER_LED_BRIGHTNESS, display_level)
-
-        time.sleep_ms(20)
-
-main()
+if __name__ == "__main__":
+    sys.exit(main())
