@@ -6,6 +6,11 @@
   let cachedVoices = [];
   let selectedPhraseId = '';
 
+  // --- Freq Audio Loop state ---
+  let loopTimerId = null;
+  let loopIndex = 0;
+  let loopKeys = [];
+
   function log(msg){
     const ts = new Date().toISOString();
     if (!logEl) return;
@@ -281,6 +286,88 @@
 
   function isFreqKey(key){
     return /^freq_(?:[1-9]|10)$/.test(String(key || ''));
+  }
+
+  function setLoopStatus(s){
+    const el = $("loopStatus");
+    if (!el) return;
+    el.textContent = s || '';
+  }
+
+  // Collect freq keys that have enabled (non-disabled) play buttons
+  function getAvailableFreqKeys(){
+    const keys = [];
+    document.querySelectorAll('button.freqAudioPlay').forEach(btn => {
+      if (!btn.disabled) {
+        const k = btn.getAttribute('data-key') || '';
+        if (k) keys.push(k);
+      }
+    });
+    return keys;
+  }
+
+  async function playFreqKey(key){
+    const device_id = ($("device") && $("device").value) || '';
+    if (!device_id || !key) return;
+    try {
+      const r = await api('/ui/saved-audio/play', 'POST', { device_id, key });
+      if (r && r.command_id) {
+        await waitForAck(device_id, r.command_id, 30000);
+      }
+    } catch(e) {
+      log(`Loop play failed for ${key}: ${e.message}`);
+    }
+  }
+
+  function startLoop(){
+    const device_id = ($("device") && $("device").value) || '';
+    if (!device_id) { setLoopStatus('Select a device first.'); return; }
+
+    loopKeys = getAvailableFreqKeys();
+    if (loopKeys.length === 0) { setLoopStatus('No audio available to loop.'); return; }
+
+    const intervalSec = parseInt(($("loopInterval") && $("loopInterval").value) || '30', 10);
+    loopIndex = 0;
+
+    const startBtn = $("loopStartBtn");
+    const stopBtn = $("loopStopBtn");
+    if (startBtn) startBtn.disabled = true;
+    if (stopBtn) stopBtn.disabled = false;
+
+    function tick(){
+      if (loopTimerId === null) return; // stopped
+      const key = loopKeys[loopIndex % loopKeys.length];
+      loopIndex++;
+      const num = key.replace('freq_', '');
+      const label = document.querySelector(`button.freqAudioPlay[data-key="${key}"]`);
+      const snippet = label ? label.textContent.trim() : key;
+      setLoopStatus(`Playing #${num}: ${snippet}`);
+      playFreqKey(key).then(() => {
+        if (loopTimerId !== null) {
+          setLoopStatus(`Next in ${intervalSec}s… (#${(loopKeys[loopIndex % loopKeys.length] || '').replace('freq_','')})`);
+        }
+      });
+      loopTimerId = setTimeout(tick, intervalSec * 1000);
+    }
+
+    // Play immediately, then loop
+    loopTimerId = setTimeout(() => {}, 0); // mark as running before first tick
+    tick();
+  }
+
+  function stopLoop(){
+    if (loopTimerId !== null) {
+      clearTimeout(loopTimerId);
+      loopTimerId = null;
+    }
+    loopIndex = 0;
+    loopKeys = [];
+    const startBtn = $("loopStartBtn");
+    const stopBtn = $("loopStopBtn");
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+    setLoopStatus('Stopped.');
+    setTimeout(() => setLoopStatus(''), 1500);
   }
 
   async function loadSavedAudioDefs(){
@@ -764,6 +851,12 @@
     textArea.addEventListener('input', updateCharCount);
     updateCharCount();
   }
+
+  // --- Freq Audio Loop controls ---
+  const loopStartBtn = $("loopStartBtn");
+  const loopStopBtn = $("loopStopBtn");
+  if (loopStartBtn) loopStartBtn.addEventListener('click', () => startLoop());
+  if (loopStopBtn) loopStopBtn.addEventListener('click', () => stopLoop());
 
   // --- Saved Audio Playback: play previously generated audio on the selected device ---
   document.addEventListener('click', async (ev) => {
