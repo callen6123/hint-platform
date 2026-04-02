@@ -3911,6 +3911,25 @@ def ui_hub_update():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.post("/ui/hub/shutdown")
+def ui_hub_shutdown():
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    _append_hub_cmd_log({"event": "hub_shutdown_requested"})
+
+    def _do_shutdown():
+        import time as _time
+        _time.sleep(1)
+        subprocess.Popen(["sudo", "shutdown", "now"])
+
+    import threading
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+
+    return jsonify({"ok": True, "message": "shutdown initiated"})
+
+
 # --- UI staged rollout endpoints ---
 
 @app.post("/ui/rollout/start")

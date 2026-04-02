@@ -407,7 +407,7 @@ async function loadAudioStatus(){
         `<td><button id="hubUpdate">Update Hub</button></td>`+
         `<td></td>`+ // Speak column (empty for Hub)
         `<td></td>`+
-        `<td></td>`+ // Shutdown column (empty for Hub)
+        `<td><button id="hubShutdownBtn" style="color:#e05555; border-color:#e05555;">Shutdown</button></td>`+
       `</tr>`
     );
 
@@ -1169,6 +1169,24 @@ async function loadAudioStatus(){
     } catch (e) {
       log(`Hub update failed: ${e.message}`);
     } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('#hubShutdownBtn') : null;
+    if (!btn) return;
+
+    const confirmed = window.confirm('Are you sure you want to shut down the Hub?');
+    if (!confirmed) return;
+
+    try {
+      btn.disabled = true;
+      log('Shutting down hub...');
+      await api('/ui/hub/shutdown', 'POST', {});
+      log('Shutdown command sent. The hub will go offline shortly.');
+    } catch (e) {
+      log(`Hub shutdown failed: ${e.message}`);
       btn.disabled = false;
     }
   });
