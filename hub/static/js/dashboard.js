@@ -407,6 +407,7 @@ async function loadAudioStatus(){
         `<td><button id="hubUpdate">Update Hub</button></td>`+
         `<td></td>`+ // Speak column (empty for Hub)
         `<td></td>`+
+        `<td></td>`+ // Shutdown column (empty for Hub)
       `</tr>`
     );
 
@@ -437,11 +438,14 @@ async function loadAudioStatus(){
           `<td>`+
             (did ? `<button data-action="beep" data-device="${esc(did)}">Beep</button>` : '')+
           `</td>`+
+          `<td>`+
+            (did ? `<button data-action="shutdown" data-device="${esc(did)}" data-name="${esc(name)}" style="color:#e05555; border-color:#e05555;">Shutdown</button>` : '')+
+          `</td>`+
         `</tr>`
       );
     }
 
-    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="7" class="muted">No devices.</td></tr>';
+    statusTbody.innerHTML = rows.join('') || '<tr><td colspan="8" class="muted">No devices.</td></tr>';
   }
 
   function setDevCfgStatus(s){
@@ -1289,6 +1293,14 @@ async function loadAudioStatus(){
         log(`Beep ${device}...`);
         const r = await api('/ui/device/beep', 'POST', { device_id: device });
         log(`Beep result: ${JSON.stringify(r)}`);
+
+      } else if (action === 'shutdown') {
+        const name = btn.getAttribute('data-name') || device;
+        const confirmed = window.confirm(`Are you sure you want to shut down ${name}?`);
+        if (!confirmed) { btn.disabled = false; return; }
+        log(`Shutdown ${device}...`);
+        const r = await api('/ui/device/shutdown', 'POST', { device_id: device });
+        log(`Shutdown result: ${JSON.stringify(r)}`);
 
       } else if (action === 'speakStop') {
         log(`Speak stop requested for ${device} (target=${targetCmd || 'unknown'})...`);

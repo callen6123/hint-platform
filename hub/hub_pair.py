@@ -2557,6 +2557,58 @@ def ui_speaker_test():
     return ui_beep()
 
 
+@app.post("/ui/device/shutdown")
+def ui_device_shutdown():
+    """Send a shutdown command to a device (Raspberry Pi).
+
+    Body: {"device_id": "..."}
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
+    command_id = f"shutdown-{device_id}-{int(time.time())}"
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="shutdown",
+        params={},
+        ttl_sec=30,
+        priority=20,
+    )
+
+    _append_hub_cmd_log({
+        "event": "shutdown_requested",
+        "site_id": str(site_id),
+        "device_id": str(device_id),
+        "command_id": str(command_id),
+    })
+
+    try:
+        publish_command(site_id, device_id, payload)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "device_id": device_id,
+        "command_id": command_id,
+    })
+
+
 # --- UI Saved Audio endpoints (common phrases) ---
 
 @app.get("/ui/saved-audio/list")

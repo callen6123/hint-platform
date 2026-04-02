@@ -1254,6 +1254,11 @@ def main() -> None:
             elif cmd in {"beep", "speaker_test"}:
                 enqueue_job({"type": "beep", "command_id": str(cid)})
 
+            elif cmd == "shutdown":
+                publish_ack(str(cid), "completed", {"action": "shutdown"})
+                time.sleep(0.5)
+                subprocess.Popen(["sudo", "shutdown", "now"])
+
             else:
                 # Back-compat: treat unknown command as play test
                 enqueue_job({"type": "play", "command_id": str(cid)})
