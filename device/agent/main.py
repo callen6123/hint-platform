@@ -82,6 +82,11 @@ HINT_AUDIO_LEVEL_FLOOR = float(os.environ.get("HINT_AUDIO_LEVEL_FLOOR", "0.03"))
 HINT_AUDIO_LEVEL_FLOOR = max(0.0, min(HINT_AUDIO_LEVEL_FLOOR, 0.5))
 HINT_AUDIO_LEVEL_TOPIC_OVERRIDE = os.environ.get("HINT_AUDIO_LEVEL_TOPIC_OVERRIDE", "").strip() or None
 
+# Music loop + ducking (customer/music-duck branch)
+HINT_MUSIC_LOOP_PATH   = os.environ.get("HINT_MUSIC_LOOP_PATH", "").strip() or None
+HINT_MUSIC_DUCK_VOLUME = int(os.environ.get("HINT_MUSIC_DUCK_VOLUME", "20"))   # % of stream vol during TTS
+HINT_MUSIC_FADE_SEC    = float(os.environ.get("HINT_MUSIC_FADE_SEC", "0.6"))   # fade in/out duration
+
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
         return json.load(f)
@@ -199,6 +204,129 @@ def set_output_volume_percent(pct: int) -> dict:
             return {"ok": True, "volume_percent": pct, "cardid": cardid, "card_index": card_index, "control": ctl}
 
     raise RuntimeError("amixer_failed")
+
+
+class MusicLoopPlayer:
+    """Loops an audio file continuously in a background thread.
+
+    Ducking works via PulseAudio per-stream volume (pactl), so the music
+    stream can be independently lowered while TTS plays at full system volume.
+    Requires PipeWire or PulseAudio (standard on Pi OS Trixie/Bookworm).
+    """
+
+    def __init__(self, path: Path, duck_pct: int, fade_sec: float):
+        self.path     = path
+        self.duck_pct = max(0, min(100, duck_pct))
+        self.fade_sec = max(0.0, fade_sec)
+        self._proc: subprocess.Popen | None = None
+        self._lock    = threading.Lock()
+        self._running = False
+
+    def start(self) -> None:
+        self._running = True
+        t = threading.Thread(target=self._loop, daemon=True, name="hint-music-loop")
+        t.start()
+        print(f"[MUSIC] started loop: {self.path}")
+
+    def _play_cmd(self) -> list[str]:
+        if self.path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
+            return ["mpg123", "-q", str(self.path)]
+        return ["paplay", str(self.path)]
+
+    def _loop(self) -> None:
+        while self._running:
+            cmd = self._play_cmd()
+            p: subprocess.Popen | None = None
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                with self._lock:
+                    self._proc = p
+                p.wait()
+            except Exception as e:
+                print(f"[MUSIC] loop error: {e}")
+                time.sleep(1.0)
+            finally:
+                with self._lock:
+                    if self._proc is not None and p is not None and self._proc.pid == p.pid:
+                        self._proc = None
+            if self._running:
+                time.sleep(0.05)  # tiny gap between loop iterations
+
+    def _find_sink_input_id(self) -> str | None:
+        """Find the PulseAudio sink-input ID for the running music process (by PID)."""
+        with self._lock:
+            p = self._proc
+        if p is None or p.poll() is not None:
+            return None
+        pid = p.pid
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sink-inputs"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+            current_id: str | None = None
+            for line in result.stdout.splitlines():
+                s = line.strip()
+                if s.startswith("Sink Input #"):
+                    current_id = s.split("#", 1)[1].strip()
+                elif "application.process.id" in s and f'"{pid}"' in s:
+                    return current_id
+        except Exception:
+            pass
+        return None
+
+    def _fade(self, sink_id: str, from_pct: int, to_pct: int) -> None:
+        steps = max(1, int(self.fade_sec * 20))  # ~20 steps/sec
+        step_delay = self.fade_sec / steps
+        for i in range(1, steps + 1):
+            vol = int(from_pct + (to_pct - from_pct) * i / steps)
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-input-volume", sink_id, f"{vol}%"],
+                    capture_output=True, timeout=1,
+                )
+            except Exception:
+                pass
+            time.sleep(step_delay)
+
+    def duck(self) -> None:
+        """Fade music stream volume down to duck level before TTS playback."""
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            self._fade(sink_id, 100, self.duck_pct)
+
+    def unduck(self) -> None:
+        """Fade music stream volume back to 100% after TTS playback."""
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            self._fade(sink_id, self.duck_pct, 100)
+
+    def stop(self) -> None:
+        self._running = False
+        with self._lock:
+            p = self._proc
+        if p:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+
+# Instantiate music loop player if configured (no-op when env var not set).
+_music_player: MusicLoopPlayer | None = None
+if HINT_MUSIC_LOOP_PATH:
+    _loop_path = Path(HINT_MUSIC_LOOP_PATH)
+    if _loop_path.exists():
+        _music_player = MusicLoopPlayer(
+            _loop_path,
+            HINT_MUSIC_DUCK_VOLUME,
+            HINT_MUSIC_FADE_SEC,
+        )
+        _music_player.start()
+    else:
+        print(f"[MUSIC] loop file not found, music disabled: {_loop_path}")
 
 
 def _aplay_cmd_for(path: Path) -> list[str]:
@@ -861,6 +989,10 @@ def main() -> None:
                 else:
                     raise RuntimeError(f"unknown_job_type:{jtype}")
 
+                # Duck background music while announcement plays.
+                if _music_player:
+                    _music_player.duck()
+
                 # Spawn player so we can cancel it mid-playback.
                 # Try a fallback chain (preferred ALSA device -> default -> bare -> paplay).
                 cmd_candidates = _player_cmd_candidates(path)
@@ -1034,6 +1166,9 @@ def main() -> None:
                 except Exception:
                     pass
             finally:
+                # Always restore music volume after playback (handles cancel/error too).
+                if _music_player:
+                    _music_player.unduck()
                 with q_lock:
                     current_job = None
                     current_proc = None
