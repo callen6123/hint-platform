@@ -318,21 +318,6 @@ class MusicLoopPlayer:
 
 
 # Instantiate music loop player if configured (no-op when env var not set).
-_music_player: MusicLoopPlayer | None = None
-if HINT_MUSIC_LOOP_PATH:
-    _loop_path = Path(HINT_MUSIC_LOOP_PATH)
-    if _loop_path.exists():
-        _music_player = MusicLoopPlayer(
-            _loop_path,
-            HINT_MUSIC_NORMAL_VOLUME,
-            HINT_MUSIC_DUCK_VOLUME,
-            HINT_MUSIC_FADE_SEC,
-        )
-        _music_player.start()
-    else:
-        print(f"[MUSIC] loop file not found, music disabled: {_loop_path}")
-
-
 def _aplay_cmd_for(path: Path) -> list[str]:
     """Return the *primary* player command for a file."""
 
@@ -387,6 +372,23 @@ def _player_cmd_candidates(path: Path) -> list[list[str]]:
         uniq.append(c)
 
     return uniq
+
+
+# Instantiate music loop player after audio helpers are defined.
+_music_player: MusicLoopPlayer | None = None
+if HINT_MUSIC_LOOP_PATH:
+    _loop_path = Path(HINT_MUSIC_LOOP_PATH)
+    if _loop_path.exists():
+        _music_player = MusicLoopPlayer(
+            _loop_path,
+            HINT_MUSIC_NORMAL_VOLUME,
+            HINT_MUSIC_DUCK_VOLUME,
+            HINT_MUSIC_FADE_SEC,
+        )
+        _music_player.start()
+    else:
+        print(f"[MUSIC] loop file not found, music disabled: {_loop_path}")
+
 
 # --- Helper: sniff audio type by magic bytes
 def sniff_audio_type(path: Path) -> str:
