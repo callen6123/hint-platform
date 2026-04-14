@@ -305,10 +305,26 @@ class MusicLoopPlayer:
             self._fade(sink_id, self.duck_pct, 100)
 
     def pause(self) -> None:
-        """Freeze the paplay process; PulseAudio drains its buffer then goes silent."""
+        """Instantly mute via pactl then freeze paplay.
+
+        Muting first silences PulseAudio's buffer immediately; SIGSTOP then
+        freezes paplay so the file position is preserved for resume.
+        """
+        if self._paused:
+            return
+        # Mute the stream instantly so the PA buffer goes silent right away.
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-input-mute", sink_id, "1"],
+                    capture_output=True, timeout=1,
+                )
+            except Exception:
+                pass
         with self._lock:
             p = self._proc
-        if p and p.poll() is None and not self._paused:
+        if p and p.poll() is None:
             try:
                 p.send_signal(signal.SIGSTOP)
                 self._paused = True
@@ -316,13 +332,25 @@ class MusicLoopPlayer:
                 pass
 
     def resume(self) -> None:
-        """Unfreeze the paplay process; music continues from where it was."""
+        """Unfreeze paplay then unmute the stream."""
+        if not self._paused:
+            return
         with self._lock:
             p = self._proc
-        if p and p.poll() is None and self._paused:
+        if p and p.poll() is None:
             try:
                 p.send_signal(signal.SIGCONT)
                 self._paused = False
+            except Exception:
+                pass
+        # Unmute after SIGCONT so audio is restored as soon as paplay resumes.
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-input-mute", sink_id, "0"],
+                    capture_output=True, timeout=1,
+                )
             except Exception:
                 pass
 
