@@ -221,6 +221,7 @@ class MusicLoopPlayer:
         self._proc: subprocess.Popen | None = None
         self._lock    = threading.Lock()
         self._running = False
+        self._paused  = False
 
     def start(self) -> None:
         self._running = True
@@ -303,12 +304,40 @@ class MusicLoopPlayer:
         if sink_id:
             self._fade(sink_id, self.duck_pct, 100)
 
+    def pause(self) -> None:
+        """Freeze the paplay process; PulseAudio drains its buffer then goes silent."""
+        with self._lock:
+            p = self._proc
+        if p and p.poll() is None and not self._paused:
+            try:
+                p.send_signal(signal.SIGSTOP)
+                self._paused = True
+            except Exception:
+                pass
+
+    def resume(self) -> None:
+        """Unfreeze the paplay process; music continues from where it was."""
+        with self._lock:
+            p = self._proc
+        if p and p.poll() is None and self._paused:
+            try:
+                p.send_signal(signal.SIGCONT)
+                self._paused = False
+            except Exception:
+                pass
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
     def stop(self) -> None:
         self._running = False
         with self._lock:
             p = self._proc
         if p:
             try:
+                if self._paused:
+                    p.send_signal(signal.SIGCONT)
                 p.terminate()
             except Exception:
                 pass
@@ -1390,6 +1419,27 @@ def main() -> None:
 
             elif cmd in {"beep", "speaker_test"}:
                 enqueue_job({"type": "beep", "command_id": str(cid)})
+
+            elif cmd == "set_music":
+                params = d.get("params") or {}
+                action = str(params.get("action") or "").strip().lower()
+                if _music_player is None:
+                    publish_ack(str(cid), "completed", {"music": "not_configured"})
+                elif action == "pause":
+                    _music_player.pause()
+                    publish_ack(str(cid), "completed", {"music": "paused"})
+                elif action == "resume":
+                    _music_player.resume()
+                    publish_ack(str(cid), "completed", {"music": "resumed"})
+                elif action == "toggle":
+                    if _music_player.is_paused:
+                        _music_player.resume()
+                        publish_ack(str(cid), "completed", {"music": "resumed"})
+                    else:
+                        _music_player.pause()
+                        publish_ack(str(cid), "completed", {"music": "paused"})
+                else:
+                    raise RuntimeError(f"unknown_music_action:{action}")
 
             elif cmd == "shutdown":
                 publish_ack(str(cid), "completed", {"action": "shutdown"})

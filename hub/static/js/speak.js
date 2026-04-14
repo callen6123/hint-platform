@@ -764,6 +764,34 @@
     }
   });
 
+  // Music pause/resume toggle
+  let _musicPaused = false;
+  const musicToggleBtn = $("musicToggleBtn");
+  if (musicToggleBtn) {
+    musicToggleBtn.addEventListener('click', async () => {
+      const device_id = $("device")?.value || '';
+      if (!device_id) { log('Pick a device first.'); return; }
+      const action = _musicPaused ? 'resume' : 'pause';
+      try {
+        musicToggleBtn.disabled = true;
+        $("musicStatus").textContent = action === 'pause' ? 'Pausing…' : 'Resuming…';
+        const r = await api('/ui/device/music', 'POST', { device_id, action });
+        if (r?.ok) {
+          _musicPaused = !_musicPaused;
+          musicToggleBtn.innerHTML = _musicPaused ? '&#9654; Resume Music' : '&#9646;&#9646; Pause Music';
+          $("musicStatus").textContent = _musicPaused ? 'Paused' : 'Playing';
+        } else {
+          $("musicStatus").textContent = r?.error || 'Error';
+        }
+      } catch(e) {
+        $("musicStatus").textContent = 'Error';
+        log(`Music toggle error: ${e.message}`);
+      } finally {
+        musicToggleBtn.disabled = false;
+      }
+    });
+  }
+
   const savePhraseBtn = $("savePhraseBtn");
   if (savePhraseBtn) savePhraseBtn.addEventListener('click', async () => {
     const label = ($("phraseLabel")?.value || '').trim();

@@ -2347,6 +2347,54 @@ def ui_phrases_delete():
     return jsonify({"ok": True, "deleted": deleted, "id": pid})
 
 
+# --- UI music pause/resume endpoint ---
+
+
+@app.post("/ui/device/music")
+def ui_device_music():
+    """Send a pause/resume/toggle command for the music loop to a device.
+
+    Body: { "device_id": "...", "action": "pause"|"resume"|"toggle" }
+    """
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    body = request.get_json(silent=True) or {}
+    device_id = sanitize_topic_id(str(body.get("device_id") or ""))
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id_required"}), 400
+
+    action = str(body.get("action") or "toggle").strip().lower()
+    if action not in ("pause", "resume", "toggle"):
+        return jsonify({"ok": False, "error": "invalid_action", "allowed": ["pause", "resume", "toggle"]}), 400
+
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+    rec = reg.get(device_id)
+    if not isinstance(rec, dict):
+        return jsonify({"ok": False, "error": "unknown_device"}), 404
+
+    site_id = sanitize_topic_id(str(rec.get("site_id") or DEFAULT_SITE_ID))
+    command_id = sanitize_topic_id(f"music-{device_id}-{int(time.time())}")
+
+    payload = make_command_payload(
+        command_id=command_id,
+        cmd="set_music",
+        params={"action": action},
+        ttl_sec=30,
+        priority=8,
+    )
+
+    try:
+        publish_command(site_id, device_id, payload)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"mqtt_publish_failed:{e}"}), 500
+
+    return jsonify({"ok": True, "device_id": device_id, "action": action, "command_id": command_id})
+
+
 # --- UI cancel endpoint ---
 
 
