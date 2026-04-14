@@ -208,17 +208,19 @@ def set_output_volume_percent(pct: int) -> dict:
 
 
 class MusicLoopPlayer:
-    """Loops an audio file continuously via aplay; ducks via amixer + SIGSTOP/SIGCONT.
+    """Loops an audio file continuously via aplay; ducks by terminating the
+    aplay process (releasing the ALSA device) so TTS can play unobstructed.
 
     Duck flow:
-      1. Fade amixer: normal_vol → duck_vol  (music audibly dims)
-      2. SIGSTOP music process               (frees ALSA device)
-      3. Set amixer → normal_vol instantly   (silent — nothing playing)
-         TTS then plays at full volume.
+      1. Set _ducked=True so loop thread won't restart music
+      2. Fade amixer: normal_vol → duck_vol  (music audibly dims)
+      3. Terminate aplay process             (releases ALSA device)
+      4. Set amixer → normal_vol instantly   (silent — TTS plays at full vol)
     Unduck flow:
-      4. Set amixer → duck_vol instantly     (silent — nothing playing yet)
-      5. SIGCONT music process               (music resumes)
-      6. Fade amixer: duck_vol → normal_vol  (music audibly rises)
+      5. Set amixer → duck_vol instantly     (silent — music not yet playing)
+      6. Set _ducked=False so loop restarts  (aplay respawns, music plays)
+      7. Brief pause for aplay to start up
+      8. Fade amixer: duck_vol → normal_vol  (music audibly rises)
     """
 
     def __init__(self, path: Path, normal_vol: int, duck_vol: int, fade_sec: float):
@@ -229,7 +231,7 @@ class MusicLoopPlayer:
         self._proc: subprocess.Popen | None = None
         self._lock      = threading.Lock()
         self._running   = False
-        self._stopped   = False
+        self._ducked    = False  # True while TTS is playing; suppresses loop restart
 
     def start(self) -> None:
         try:
@@ -243,6 +245,9 @@ class MusicLoopPlayer:
 
     def _loop(self) -> None:
         while self._running:
+            if self._ducked:
+                time.sleep(0.05)
+                continue
             cmd = _aplay_cmd_for(self.path)
             p: subprocess.Popen | None = None
             try:
@@ -257,7 +262,7 @@ class MusicLoopPlayer:
                 with self._lock:
                     if self._proc is not None and p is not None and self._proc.pid == p.pid:
                         self._proc = None
-            if self._running:
+            if self._running and not self._ducked:
                 time.sleep(0.05)  # tiny gap between loop iterations
 
     def _fade_amixer(self, from_pct: int, to_pct: int) -> None:
@@ -272,14 +277,15 @@ class MusicLoopPlayer:
             time.sleep(step_delay)
 
     def duck(self) -> None:
-        """Fade amixer down, pause music to free ALSA, restore volume for TTS."""
+        """Fade amixer down, terminate music to release ALSA, restore vol for TTS."""
+        self._ducked = True  # stop loop from restarting aplay
         self._fade_amixer(self.normal_vol, self.duck_vol)
         with self._lock:
             p = self._proc
         if p and p.poll() is None:
             try:
-                p.send_signal(signal.SIGSTOP)
-                self._stopped = True
+                p.terminate()
+                p.wait(timeout=2)
             except Exception:
                 pass
         # Restore to full volume while ALSA is free — TTS plays prominently.
@@ -289,20 +295,14 @@ class MusicLoopPlayer:
             pass
 
     def unduck(self) -> None:
-        """Lower volume, resume music, then fade back up."""
-        # Drop volume before resuming so music doesn't blast back at full.
+        """Allow music to restart, then fade volume back up."""
+        # Drop amixer before music kicks in so it doesn't blast at full.
         try:
             set_output_volume_percent(self.duck_vol)
         except Exception:
             pass
-        with self._lock:
-            p = self._proc
-        if p and self._stopped:
-            try:
-                p.send_signal(signal.SIGCONT)
-                self._stopped = False
-            except Exception:
-                pass
+        self._ducked = False  # loop will respawn aplay on next iteration
+        time.sleep(0.15)      # brief pause for aplay to start and claim ALSA
         self._fade_amixer(self.duck_vol, self.normal_vol)
 
     def stop(self) -> None:
@@ -311,7 +311,6 @@ class MusicLoopPlayer:
             p = self._proc
         if p:
             try:
-                p.send_signal(signal.SIGCONT)  # un-stop first if suspended
                 p.terminate()
             except Exception:
                 pass
