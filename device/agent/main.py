@@ -83,10 +83,9 @@ HINT_AUDIO_LEVEL_FLOOR = max(0.0, min(HINT_AUDIO_LEVEL_FLOOR, 0.5))
 HINT_AUDIO_LEVEL_TOPIC_OVERRIDE = os.environ.get("HINT_AUDIO_LEVEL_TOPIC_OVERRIDE", "").strip() or None
 
 # Music loop + ducking (customer/music-duck branch)
-HINT_MUSIC_LOOP_PATH    = os.environ.get("HINT_MUSIC_LOOP_PATH", "").strip() or None
-HINT_MUSIC_NORMAL_VOLUME = int(os.environ.get("HINT_MUSIC_NORMAL_VOLUME", "80"))  # system vol during music
-HINT_MUSIC_DUCK_VOLUME  = int(os.environ.get("HINT_MUSIC_DUCK_VOLUME", "20"))    # system vol during TTS fade-out
-HINT_MUSIC_FADE_SEC     = float(os.environ.get("HINT_MUSIC_FADE_SEC", "0.6"))    # fade in/out duration
+HINT_MUSIC_LOOP_PATH   = os.environ.get("HINT_MUSIC_LOOP_PATH", "").strip() or None
+HINT_MUSIC_DUCK_VOLUME = int(os.environ.get("HINT_MUSIC_DUCK_VOLUME", "20"))   # music stream % during TTS
+HINT_MUSIC_FADE_SEC    = float(os.environ.get("HINT_MUSIC_FADE_SEC", "0.6"))   # fade in/out duration
 
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
@@ -208,47 +207,35 @@ def set_output_volume_percent(pct: int) -> dict:
 
 
 class MusicLoopPlayer:
-    """Loops an audio file continuously via aplay; ducks by terminating the
-    aplay process (releasing the ALSA device) so TTS can play unobstructed.
+    """Loops an audio file via paplay; ducks via pactl per-stream volume.
 
-    Duck flow:
-      1. Set _ducked=True so loop thread won't restart music
-      2. Fade amixer: normal_vol → duck_vol  (music audibly dims)
-      3. Terminate aplay process             (releases ALSA device)
-      4. Set amixer → normal_vol instantly   (silent — TTS plays at full vol)
-    Unduck flow:
-      5. Set amixer → duck_vol instantly     (silent — music not yet playing)
-      6. Set _ducked=False so loop restarts  (aplay respawns, music plays)
-      7. Brief pause for aplay to start up
-      8. Fade amixer: duck_vol → normal_vol  (music audibly rises)
+    Music keeps playing throughout — duck() lowers only the music stream
+    so TTS plays at full system volume simultaneously.
+    Requires PulseAudio system daemon (pulseaudio --system).
     """
 
-    def __init__(self, path: Path, normal_vol: int, duck_vol: int, fade_sec: float):
-        self.path       = path
-        self.normal_vol = max(0, min(100, normal_vol))
-        self.duck_vol   = max(0, min(100, duck_vol))
-        self.fade_sec   = max(0.0, fade_sec)
+    def __init__(self, path: Path, duck_pct: int, fade_sec: float):
+        self.path     = path
+        self.duck_pct = max(0, min(100, duck_pct))
+        self.fade_sec = max(0.0, fade_sec)
         self._proc: subprocess.Popen | None = None
-        self._lock      = threading.Lock()
-        self._running   = False
-        self._ducked    = False  # True while TTS is playing; suppresses loop restart
+        self._lock    = threading.Lock()
+        self._running = False
 
     def start(self) -> None:
-        try:
-            set_output_volume_percent(self.normal_vol)
-        except Exception:
-            pass
         self._running = True
         t = threading.Thread(target=self._loop, daemon=True, name="hint-music-loop")
         t.start()
         print(f"[MUSIC] started loop: {self.path}")
 
+    def _play_cmd(self) -> list[str]:
+        if self.path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
+            return ["mpg123", "-q", str(self.path)]
+        return ["paplay", str(self.path)]
+
     def _loop(self) -> None:
         while self._running:
-            if self._ducked:
-                time.sleep(0.05)
-                continue
-            cmd = _aplay_cmd_for(self.path)
+            cmd = self._play_cmd()
             p: subprocess.Popen | None = None
             try:
                 p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -262,48 +249,59 @@ class MusicLoopPlayer:
                 with self._lock:
                     if self._proc is not None and p is not None and self._proc.pid == p.pid:
                         self._proc = None
-            if self._running and not self._ducked:
+            if self._running:
                 time.sleep(0.05)  # tiny gap between loop iterations
 
-    def _fade_amixer(self, from_pct: int, to_pct: int) -> None:
+    def _find_sink_input_id(self) -> str | None:
+        """Find the PulseAudio sink-input ID for the music process by PID."""
+        with self._lock:
+            p = self._proc
+        if p is None or p.poll() is not None:
+            return None
+        pid = p.pid
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sink-inputs"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+            current_id: str | None = None
+            for line in result.stdout.splitlines():
+                s = line.strip()
+                if s.startswith("Sink Input #"):
+                    current_id = s.split("#", 1)[1].strip()
+                elif "application.process.id" in s and f'"{pid}"' in s:
+                    return current_id
+        except Exception:
+            pass
+        return None
+
+    def _fade(self, sink_id: str, from_pct: int, to_pct: int) -> None:
         steps = max(1, int(self.fade_sec * 20))  # ~20 steps/sec
         step_delay = self.fade_sec / steps
         for i in range(1, steps + 1):
             vol = int(from_pct + (to_pct - from_pct) * i / steps)
             try:
-                set_output_volume_percent(vol)
+                subprocess.run(
+                    ["pactl", "set-sink-input-volume", sink_id, f"{vol}%"],
+                    capture_output=True, timeout=1,
+                )
             except Exception:
                 pass
             time.sleep(step_delay)
 
     def duck(self) -> None:
-        """Fade amixer down, terminate music to release ALSA, restore vol for TTS."""
-        self._ducked = True  # stop loop from restarting aplay
-        self._fade_amixer(self.normal_vol, self.duck_vol)
-        with self._lock:
-            p = self._proc
-        if p and p.poll() is None:
-            try:
-                p.terminate()
-                p.wait(timeout=2)
-            except Exception:
-                pass
-        # Restore to full volume while ALSA is free — TTS plays prominently.
-        try:
-            set_output_volume_percent(self.normal_vol)
-        except Exception:
-            pass
+        """Fade music stream volume down — music keeps playing quietly."""
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            self._fade(sink_id, 100, self.duck_pct)
 
     def unduck(self) -> None:
-        """Allow music to restart, then fade volume back up."""
-        # Drop amixer before music kicks in so it doesn't blast at full.
-        try:
-            set_output_volume_percent(self.duck_vol)
-        except Exception:
-            pass
-        self._ducked = False  # loop will respawn aplay on next iteration
-        time.sleep(0.15)      # brief pause for aplay to start and claim ALSA
-        self._fade_amixer(self.duck_vol, self.normal_vol)
+        """Fade music stream volume back to 100%."""
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            self._fade(sink_id, self.duck_pct, 100)
 
     def stop(self) -> None:
         self._running = False
@@ -380,7 +378,6 @@ if HINT_MUSIC_LOOP_PATH:
     if _loop_path.exists():
         _music_player = MusicLoopPlayer(
             _loop_path,
-            HINT_MUSIC_NORMAL_VOLUME,
             HINT_MUSIC_DUCK_VOLUME,
             HINT_MUSIC_FADE_SEC,
         )
