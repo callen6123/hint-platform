@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}" />
   <script>
     window.HUB_SITE_ID = "{{ site_id | default('demo') }}";
+    window.HUB_UI_ROLE = "{{ ui_role | default('') }}";
   </script>
   <script defer src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </head>
@@ -20,12 +21,12 @@
       <!-- <span class="muted">Auto-refresh: 5s</span> -->
     </div>
     <div class="controls right">
-      <button id="refresh">Refresh</button>
-      <button id="audioCleanup">Clear Audio Cache</button>
-      <button id="hubCmdLogBtn" title="View hub command/audit log">Hub Cmd Log</button>
+      <button id="refresh" class="admin-only">Refresh</button>
+      <button id="audioCleanup" class="admin-only">Clear Audio Cache</button>
+      <button id="hubCmdLogBtn" class="admin-only" title="View hub command/audit log">Hub Cmd Log</button>
       <button id="runbookBtn" title="Open runbook">Runbook</button>
 
-      <button id="accountBtn" title="Account settings" style="margin-left:10px;">Account</button>
+      <button id="accountBtn" class="admin-only" title="Account settings" style="margin-left:10px;">Account</button>
       <button id="logoutBtn" title="Sign out">Logout</button>
     </div>
   </header>
@@ -37,12 +38,12 @@
           <tr>
             <th>Device</th>
             <th>Status</th>
-            <th>Version</th>
-            <th>Updates</th>
-            <th>Actions</th>
+            <th class="admin-only">Version</th>
+            <th class="admin-only">Updates</th>
+            <th class="admin-only">Actions</th>
             <th>Speak</th>
             <th>Test</th>
-            <th>Shutdown</th>
+            <th class="admin-only">Shutdown</th>
           </tr>
         </thead>
         <tbody id="statusTbody">
@@ -64,7 +65,7 @@
       <div class="muted" id="hubHealthErr" style="margin-top:6px;"></div>
     </div> -->
 
-    <div class="panel" id="accountPanel" style="display:none;">
+    <div class="panel admin-only" id="accountPanel" style="display:none;">
       <h3>Account</h3>
       <div class="kv" style="margin-bottom:10px;">
         <div><span class="muted">Signed in as:</span> <span id="accountUser">—</span></div>
@@ -102,7 +103,30 @@
       </div>
     </div>
 
-    <div class="panel" id="hubCmdLogPanel" style="display:none;">
+    <details class="panel admin-only" id="wifiPanel" style="margin-top:14px;">
+      <summary style="cursor:pointer; user-select:none; list-style:none;">
+        <span style="font-weight:600; font-size:14px;">Update WiFi</span>
+        <span class="muted" style="margin-left:8px;">(click to expand)</span>
+      </summary>
+      <div style="margin-top:10px;">
+        <div class="muted small" style="margin-bottom:12px;">
+          To update the WiFi, enter the new SSID and password then click Submit.
+          <strong>NOTE: Make sure ALL devices are powered on and show ONLINE before performing this action.</strong>
+        </div>
+        <div class="controls" style="flex-wrap:wrap; gap:10px;">
+          <label>SSID
+            <input id="wifiSsid" type="text" placeholder="Network name" style="min-width:220px;" />
+          </label>
+          <label>Password
+            <input id="wifiPsk" type="password" placeholder="Network password" style="min-width:220px;" />
+          </label>
+          <button id="wifiSubmitBtn">Submit</button>
+        </div>
+        <div class="muted small" id="wifiStatus" style="margin-top:8px;"></div>
+      </div>
+    </details>
+
+    <div class="panel admin-only" id="hubCmdLogPanel" style="display:none;">
       <h3>Hub Command Log</h3>
       <div class="controls">
         <button id="hubCmdLogRefreshBtn">Refresh</button>
@@ -127,7 +151,7 @@
           <th>Last Cmd</th>
           <th>Speak</th>
           <th>Last Result</th>
-          <th>Actions</th>
+          <th class="admin-only">Actions</th>
         </tr>
       </thead>
       <tbody id="tbody">
@@ -160,7 +184,7 @@
       </div>
     </div>
 
-    <div class="panel" id="deviceCfgPanel">
+    <div class="panel admin-only" id="deviceCfgPanel">
       <h3>Device Names</h3>
 
       <!-- Row 1: Device dropdown -->
@@ -182,7 +206,7 @@
       <div class="muted small" id="deviceHint" style="margin-top:6px;"></div>
     </div>
 
-    <div class="panel" id="mqttHelpPanel">
+    <div class="panel admin-only" id="mqttHelpPanel">
       <h3>MQTT Integration</h3>
 
       <div class="controls" style="gap:10px; flex-wrap:wrap; align-items:end;">
@@ -205,7 +229,7 @@
       </div>
     </div>
 
-    <div class="panel" id="audioPanel">
+    <div class="panel admin-only" id="audioPanel">
       <h3>Hub Audio Cache</h3>
       <div class="kv" id="audioKv">
         <div><span class="muted">Dir:</span> <span id="audioDir"></span></div>

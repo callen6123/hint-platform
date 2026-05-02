@@ -358,6 +358,23 @@ class MusicLoopPlayer:
     def is_paused(self) -> bool:
         return self._paused
 
+    def restart(self) -> None:
+        """Restart the loop from the beginning.
+
+        Terminates the current paplay process; the loop thread will
+        immediately respawn it from the top of the file.
+        """
+        with self._lock:
+            p = self._proc
+        if p and p.poll() is None:
+            try:
+                if self._paused:
+                    p.send_signal(signal.SIGCONT)
+                    self._paused = False
+                p.terminate()
+            except Exception:
+                pass
+
     def stop(self) -> None:
         self._running = False
         with self._lock:
@@ -1466,6 +1483,9 @@ def main() -> None:
                     else:
                         _music_player.pause()
                         publish_ack(str(cid), "completed", {"music": "paused"})
+                elif action == "restart":
+                    _music_player.restart()
+                    publish_ack(str(cid), "completed", {"music": "restarted"})
                 else:
                     raise RuntimeError(f"unknown_music_action:{action}")
 
@@ -1473,6 +1493,40 @@ def main() -> None:
                 publish_ack(str(cid), "completed", {"action": "shutdown"})
                 time.sleep(0.5)
                 subprocess.Popen(["sudo", "shutdown", "now"])
+
+            elif cmd == "set_wifi":
+                params = d.get("params") or {}
+                ssid = str(params.get("ssid") or "").strip()
+                psk = str(params.get("psk") or "").strip()
+                if not ssid or not psk:
+                    raise RuntimeError("ssid_and_psk_required")
+
+                # ACK before switching — the wifi change will drop MQTT.
+                publish_ack(str(cid), "completed", {"action": "set_wifi", "ssid": ssid})
+                time.sleep(0.5)
+
+                # Build and activate new wifi profile (same as device_setup)
+                conn_name = "venue-" + "".join(
+                    c if (c.isalnum() or c in ("-", "_")) else "_" for c in ssid
+                )[:22]
+                try:
+                    subprocess.check_call(["sudo", "nmcli", "con", "delete", conn_name])
+                except Exception:
+                    pass
+                subprocess.check_call([
+                    "sudo", "nmcli", "con", "add",
+                    "type", "wifi", "ifname", "wlan0",
+                    "con-name", conn_name, "ssid", ssid,
+                ])
+                subprocess.check_call([
+                    "sudo", "nmcli", "con", "modify", conn_name,
+                    "wifi-sec.key-mgmt", "wpa-psk",
+                ])
+                subprocess.check_call([
+                    "sudo", "nmcli", "con", "modify", conn_name,
+                    "wifi-sec.psk", psk,
+                ])
+                subprocess.check_call(["sudo", "nmcli", "con", "up", conn_name])
 
             else:
                 # Back-compat: treat unknown command as play test

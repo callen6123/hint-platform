@@ -1477,6 +1477,129 @@ def ui_admin_create_or_reset_gm():
     return jsonify({"ok": True, "username": uname, "created": created})
 
 
+@app.post("/ui/admin/wifi")
+def ui_admin_update_wifi():
+    """Admin: update wifi credentials on all online devices, then the hub."""
+    ar = require_ui_auth()
+    if ar is not None:
+        return ar
+
+    admin = _require_admin_user()
+    if not admin:
+        return jsonify({"ok": False, "error": "admin_required"}), 403
+
+    body = request.get_json(silent=True) or {}
+    ssid = str(body.get("ssid") or "").strip()
+    psk = str(body.get("psk") or "").strip()
+
+    if not ssid:
+        return jsonify({"ok": False, "error": "ssid_required"}), 400
+    if not psk:
+        return jsonify({"ok": False, "error": "psk_required"}), 400
+
+    # Determine which devices are online
+    reg = read_registry()
+    if not isinstance(reg, dict):
+        reg = {}
+
+    try:
+        offline_after = int(os.environ.get("HINT_DEVICE_OFFLINE_AFTER_SEC", "60"))
+    except Exception:
+        offline_after = 60
+    offline_after = max(5, min(offline_after, 24 * 3600))
+    now_ts = int(time.time())
+
+    online_devices = []
+    for did, rec in reg.items():
+        if not isinstance(rec, dict) or not did:
+            continue
+        last_seen_iso = rec.get("last_seen")
+        if not isinstance(last_seen_iso, str) or not last_seen_iso.strip():
+            continue
+        try:
+            s = last_seen_iso.strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age_sec = now_ts - int(dt.timestamp())
+            if age_sec >= 0 and age_sec <= offline_after:
+                online_devices.append(did)
+        except Exception:
+            continue
+
+    _append_hub_cmd_log({
+        "event": "wifi_update_started",
+        "admin_username": str(admin.get("username") or ""),
+        "ssid": ssid,
+        "online_devices": online_devices,
+    })
+
+    # Step 1: Send set_wifi command to all online devices
+    device_results = {}
+    site_id = DEFAULT_SITE_ID
+    for did in online_devices:
+        cmd_id = f"wifi-{did}-{int(time.time())}"
+        payload = make_command_payload(
+            command_id=cmd_id,
+            cmd="set_wifi",
+            params={"ssid": ssid, "psk": psk},
+            ttl_sec=120,
+            priority=10,
+        )
+        try:
+            publish_command(site_id, did, payload)
+            device_results[did] = "sent"
+        except Exception as e:
+            device_results[did] = f"publish_failed: {e}"
+
+    # Step 2: Brief pause to let devices receive and process the command
+    time.sleep(3)
+
+    # Step 3: Switch the hub's own wifi
+    hub_result = "ok"
+    try:
+        # Inline the same nmcli logic as hub_setup.connect_with_profile
+        conn = "venue-" + "".join(
+            c if (c.isalnum() or c in ("-", "_")) else "_" for c in ssid
+        )[:22]
+        try:
+            subprocess.check_call(["sudo", "nmcli", "con", "delete", conn])
+        except Exception:
+            pass
+        subprocess.check_call([
+            "sudo", "nmcli", "con", "add",
+            "type", "wifi", "ifname", "wlan0",
+            "con-name", conn, "ssid", ssid,
+        ])
+        subprocess.check_call([
+            "sudo", "nmcli", "con", "modify", conn,
+            "wifi-sec.key-mgmt", "wpa-psk",
+        ])
+        subprocess.check_call([
+            "sudo", "nmcli", "con", "modify", conn,
+            "wifi-sec.psk", psk,
+        ])
+        subprocess.check_call(["sudo", "nmcli", "con", "up", conn])
+    except Exception as e:
+        hub_result = f"failed: {e}"
+
+    _append_hub_cmd_log({
+        "event": "wifi_update_completed",
+        "ssid": ssid,
+        "hub_result": hub_result,
+        "device_results": device_results,
+    })
+
+    return jsonify({
+        "ok": hub_result == "ok",
+        "hub_result": hub_result,
+        "device_results": device_results,
+        "online_device_count": len(online_devices),
+    })
+
+
 def mqtt_admin_cfg() -> tuple[str, int, str, str]:
     host = os.environ.get("HUB_MQTT_HOST", "localhost")
     port = int(os.environ.get("HUB_MQTT_PORT", "1883"))
@@ -2083,6 +2206,7 @@ def _render_speak_page(fixed_device_id: str | None = None):
         devices=devices,
         fixed_device_id=(fixed if fixed else None),
         fixed_device_label=fixed_label,
+        ui_role=str((g.ui_user or {}).get("role") or "").lower(),
     )
 
 @app.get("/speak/<device_id>")
@@ -2352,9 +2476,9 @@ def ui_phrases_delete():
 
 @app.post("/ui/device/music")
 def ui_device_music():
-    """Send a pause/resume/toggle command for the music loop to a device.
+    """Send a pause/resume/toggle/restart command for the music loop to a device.
 
-    Body: { "device_id": "...", "action": "pause"|"resume"|"toggle" }
+    Body: { "device_id": "...", "action": "pause"|"resume"|"toggle"|"restart" }
     """
     ar = require_ui_auth()
     if ar is not None:
@@ -2366,8 +2490,8 @@ def ui_device_music():
         return jsonify({"ok": False, "error": "device_id_required"}), 400
 
     action = str(body.get("action") or "toggle").strip().lower()
-    if action not in ("pause", "resume", "toggle"):
-        return jsonify({"ok": False, "error": "invalid_action", "allowed": ["pause", "resume", "toggle"]}), 400
+    if action not in ("pause", "resume", "toggle", "restart"):
+        return jsonify({"ok": False, "error": "invalid_action", "allowed": ["pause", "resume", "toggle", "restart"]}), 400
 
     reg = read_registry()
     if not isinstance(reg, dict):
@@ -4191,10 +4315,12 @@ def ui_speak_page():
 # Dashboard HTML shell route
 @app.get("/dashboard")
 def dashboard():
-    ar = require_ui_admin()
+    ar = require_ui_auth()
     if ar is not None:
         return ar
-    return render_template("dashboard.html", site_id=DEFAULT_SITE_ID)
+    cu = g.ui_user or {}
+    role = str(cu.get("role") or "").lower()
+    return render_template("dashboard.html", site_id=DEFAULT_SITE_ID, ui_role=role)
 
 
 if __name__ == "__main__":
