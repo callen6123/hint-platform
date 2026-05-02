@@ -36,18 +36,23 @@ chmod 640 /etc/mosquitto/hint/acl
 chown root:root /etc/mosquitto/hint/acl
 
 echo "[RESET] Soft-resetting hub secrets (/etc/hint/hub.env)..."
+# Preserve the existing ELEVENLABS_API_KEY across factory resets so the hub
+# stays functional without re-provisioning the TTS credential.
+_preserved_elevenlabs_key=""
 if [ -f /etc/hint/hub.env ]; then
   cp /etc/hint/hub.env "/etc/hint/hub.env.bak.$(date +%s)" 2>/dev/null || true
+  _preserved_elevenlabs_key="$(grep -E '^ELEVENLABS_API_KEY=' /etc/hint/hub.env | tail -n1 | cut -d= -f2-)"
 fi
-cat > /etc/hint/hub.env <<'EOF'
+cat > /etc/hint/hub.env <<EOF
 # Hint Hub environment (factory reset)
 # Fill these during provisioning before demo/shipping.
-ELEVENLABS_API_KEY=
+ELEVENLABS_API_KEY=${_preserved_elevenlabs_key}
 HINT_UI_USER=
 HINT_UI_PASS=
 HINT_UI_SECRET=
 HINT_DASH_API_KEY=
 EOF
+unset _preserved_elevenlabs_key
 chown root:root /etc/hint/hub.env
 chmod 600 /etc/hint/hub.env
 

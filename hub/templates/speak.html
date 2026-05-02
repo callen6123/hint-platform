@@ -6,6 +6,9 @@
   <title>Type & Tell</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/speak.css') }}" />
+  <script>
+    window.HUB_UI_ROLE = "{{ ui_role | default('') }}";
+  </script>
 </head>
 <body>
   <header>
@@ -23,6 +26,9 @@
         {% endfor %}
       {% endif %}
       <!-- </nav> -->
+    </div>
+    <div class="controls right">
+      <button id="logoutBtn" title="Sign out">Logout</button>
     </div>
   </header>
 
@@ -110,6 +116,13 @@
           <span class="muted small" id="speedStatus" style="margin-left:10px;"></span>
         </div>
 
+        <div class="row" style="align-items:center; margin-top:8px;">
+          <label style="min-width:140px; margin:0;">Background Music</label>
+          <button id="musicToggleBtn" style="min-width:130px;">&#9646;&#9646; Pause Music</button>
+          <button id="musicRestartBtn" style="min-width:130px; margin-left:8px;">&#8634; Restart Music</button>
+          <span class="muted small" id="musicStatus" style="margin-left:10px;"></span>
+        </div>
+
         <div class="muted small" style="margin-top:6px;">
           Adjusts the device’s output volume and the voice playback speed.
         </div>
@@ -145,7 +158,7 @@
       </div>
     </details>
 
-    <details class="panel" style="margin-top:14px;">
+    <details class="panel admin-only" style="margin-top:14px;">
       <summary style="cursor:pointer; user-select:none; list-style:none;">
         <span style="font-weight:600; font-size:14px;">Saved Audio Generation</span>
         <span class="muted" style="margin-left:8px;">(click to expand)</span>
@@ -156,40 +169,40 @@
           Create common phrases ahead of time. Audio is saved on the hub and can be replayed instantly.
         </div>
 
-        <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center;">
-          <label style="min-width:140px; margin:0;">Intro/Welcome</label>
-          <input class="savedAudioText" id="saved_text_intro_welcome" data-key="intro_welcome" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-          <button class="savedAudioGen" data-key="intro_welcome" id="gen_intro_welcome">Generate Audio</button>
+        <div class="row savedAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%;">
+          <label style="flex:0 0 140px; margin:0;">Intro/Welcome</label>
+          <input class="savedAudioText" id="saved_text_intro_welcome" data-key="intro_welcome" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+          <button class="savedAudioGen" data-key="intro_welcome" id="gen_intro_welcome" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
         </div>
 
-        <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-          <label style="min-width:140px; margin:0;">Outro/Win</label>
-          <input class="savedAudioText" id="saved_text_outro_win" data-key="outro_win" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-          <button class="savedAudioGen" data-key="outro_win" id="gen_outro_win">Generate Audio</button>
+        <div class="row savedAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+          <label style="flex:0 0 140px; margin:0;">Outro/Win</label>
+          <input class="savedAudioText" id="saved_text_outro_win" data-key="outro_win" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+          <button class="savedAudioGen" data-key="outro_win" id="gen_outro_win" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
         </div>
 
-        <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-          <label style="min-width:140px; margin:0;">Outro/Lose</label>
-          <input class="savedAudioText" id="saved_text_outro_lose" data-key="outro_lose" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-          <button class="savedAudioGen" data-key="outro_lose" id="gen_outro_lose">Generate Audio</button>
+        <div class="row savedAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+          <label style="flex:0 0 140px; margin:0;">Outro/Lose</label>
+          <input class="savedAudioText" id="saved_text_outro_lose" data-key="outro_lose" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+          <button class="savedAudioGen" data-key="outro_lose" id="gen_outro_lose" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
         </div>
 
-        <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-          <label style="min-width:140px; margin:0;">Time: 30 min</label>
-          <input class="savedAudioText" id="saved_text_time_30" data-key="time_30" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-          <button class="savedAudioGen" data-key="time_30" id="gen_time_30">Generate Audio</button>
+        <div class="row savedAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+          <label style="flex:0 0 140px; margin:0;">Time: 30 min</label>
+          <input class="savedAudioText" id="saved_text_time_30" data-key="time_30" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+          <button class="savedAudioGen" data-key="time_30" id="gen_time_30" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
         </div>
 
-        <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-          <label style="min-width:140px; margin:0;">Time: 15 min</label>
-          <input class="savedAudioText" id="saved_text_time_15" data-key="time_15" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-          <button class="savedAudioGen" data-key="time_15" id="gen_time_15">Generate Audio</button>
+        <div class="row savedAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+          <label style="flex:0 0 140px; margin:0;">Time: 15 min</label>
+          <input class="savedAudioText" id="saved_text_time_15" data-key="time_15" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+          <button class="savedAudioGen" data-key="time_15" id="gen_time_15" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
         </div>
 
-        <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-          <label style="min-width:140px; margin:0;">Time: 5 min</label>
-          <input class="savedAudioText" id="saved_text_time_5" data-key="time_5" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-          <button class="savedAudioGen" data-key="time_5" id="gen_time_5">Generate Audio</button>
+        <div class="row savedAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+          <label style="flex:0 0 140px; margin:0;">Time: 5 min</label>
+          <input class="savedAudioText" id="saved_text_time_5" data-key="time_5" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+          <button class="savedAudioGen" data-key="time_5" id="gen_time_5" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
         </div>
 
         <div class="muted small" id="savedAudioGenStatus" style="margin-top:10px;"></div>
@@ -268,7 +281,7 @@
       </div>
     </details>
 
-    <details class="panel" style="margin-top:14px;">
+    <details class="panel admin-only" style="margin-top:14px;">
       <summary style="cursor:pointer; user-select:none; list-style:none;">
         <span style="font-weight:600; font-size:14px;">Frequently Used Audio Generation</span>
         <span class="muted" style="margin-left:8px;">(click to expand)</span>
@@ -280,55 +293,55 @@
         </div>
 
         <div class="freq-gen" id="freqGen">
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center;">
-            <label style="min-width:40px; margin:0;">1</label>
-            <input class="freqAudioText" id="freq_text_1" data-key="freq_1" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_1" id="freq_gen_1">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%;">
+            <label style="flex:0 0 40px; margin:0;">1</label>
+            <input class="freqAudioText" id="freq_text_1" data-key="freq_1" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_1" id="freq_gen_1" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">2</label>
-            <input class="freqAudioText" id="freq_text_2" data-key="freq_2" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_2" id="freq_gen_2">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">2</label>
+            <input class="freqAudioText" id="freq_text_2" data-key="freq_2" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_2" id="freq_gen_2" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">3</label>
-            <input class="freqAudioText" id="freq_text_3" data-key="freq_3" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_3" id="freq_gen_3">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">3</label>
+            <input class="freqAudioText" id="freq_text_3" data-key="freq_3" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_3" id="freq_gen_3" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">4</label>
-            <input class="freqAudioText" id="freq_text_4" data-key="freq_4" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_4" id="freq_gen_4">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">4</label>
+            <input class="freqAudioText" id="freq_text_4" data-key="freq_4" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_4" id="freq_gen_4" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">5</label>
-            <input class="freqAudioText" id="freq_text_5" data-key="freq_5" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_5" id="freq_gen_5">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">5</label>
+            <input class="freqAudioText" id="freq_text_5" data-key="freq_5" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_5" id="freq_gen_5" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">6</label>
-            <input class="freqAudioText" id="freq_text_6" data-key="freq_6" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_6" id="freq_gen_6">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">6</label>
+            <input class="freqAudioText" id="freq_text_6" data-key="freq_6" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_6" id="freq_gen_6" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">7</label>
-            <input class="freqAudioText" id="freq_text_7" data-key="freq_7" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_7" id="freq_gen_7">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">7</label>
+            <input class="freqAudioText" id="freq_text_7" data-key="freq_7" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_7" id="freq_gen_7" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">8</label>
-            <input class="freqAudioText" id="freq_text_8" data-key="freq_8" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_8" id="freq_gen_8">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">8</label>
+            <input class="freqAudioText" id="freq_text_8" data-key="freq_8" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_8" id="freq_gen_8" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">9</label>
-            <input class="freqAudioText" id="freq_text_9" data-key="freq_9" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_9" id="freq_gen_9">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">9</label>
+            <input class="freqAudioText" id="freq_text_9" data-key="freq_9" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_9" id="freq_gen_9" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
-          <div class="row" style="flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px;">
-            <label style="min-width:40px; margin:0;">10</label>
-            <input class="freqAudioText" id="freq_text_10" data-key="freq_10" type="text" placeholder="Enter text…" style="flex:1; min-width:260px;" />
-            <button class="freqAudioGen" data-key="freq_10" id="freq_gen_10">Generate Audio</button>
+          <div class="row freqAudioGenRow" style="display:flex; flex-wrap:nowrap; gap:10px; align-items:center; width:100%; margin-top:10px;">
+            <label style="flex:0 0 40px; margin:0;">10</label>
+            <input class="freqAudioText" id="freq_text_10" data-key="freq_10" type="text" placeholder="Enter text…" style="flex:1 1 auto; min-width:0; width:100%;" />
+            <button class="freqAudioGen" data-key="freq_10" id="freq_gen_10" style="flex:0 0 auto; white-space:nowrap;">Generate Audio</button>
           </div>
         </div>
 
@@ -339,6 +352,12 @@
 
   <!-- <div class="log" id="log"></div> -->
 
+  <script>
+    // Hide admin-only elements for non-admin users
+    if ((window.HUB_UI_ROLE || '').toLowerCase() !== 'admin') {
+      document.querySelectorAll('.admin-only').forEach(function(el) { el.style.display = 'none'; });
+    }
+  </script>
   <script defer src="{{ url_for('static', filename='js/speak.js') }}"></script>
   {% if fixed_device_id %}
   <script>

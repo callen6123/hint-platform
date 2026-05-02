@@ -82,6 +82,11 @@ HINT_AUDIO_LEVEL_FLOOR = float(os.environ.get("HINT_AUDIO_LEVEL_FLOOR", "0.03"))
 HINT_AUDIO_LEVEL_FLOOR = max(0.0, min(HINT_AUDIO_LEVEL_FLOOR, 0.5))
 HINT_AUDIO_LEVEL_TOPIC_OVERRIDE = os.environ.get("HINT_AUDIO_LEVEL_TOPIC_OVERRIDE", "").strip() or None
 
+# Music loop + ducking (customer/music-duck branch)
+HINT_MUSIC_LOOP_PATH   = os.environ.get("HINT_MUSIC_LOOP_PATH", "").strip() or None
+HINT_MUSIC_DUCK_VOLUME = int(os.environ.get("HINT_MUSIC_DUCK_VOLUME", "20"))   # music stream % during TTS
+HINT_MUSIC_FADE_SEC    = float(os.environ.get("HINT_MUSIC_FADE_SEC", "0.6"))   # fade in/out duration
+
 def load_provision() -> dict:
     with PROVISION_PATH.open("r") as f:
         return json.load(f)
@@ -201,6 +206,189 @@ def set_output_volume_percent(pct: int) -> dict:
     raise RuntimeError("amixer_failed")
 
 
+class MusicLoopPlayer:
+    """Loops an audio file via paplay; ducks via pactl per-stream volume.
+
+    Music keeps playing throughout — duck() lowers only the music stream
+    so TTS plays at full system volume simultaneously.
+    Requires PulseAudio system daemon (pulseaudio --system).
+    """
+
+    def __init__(self, path: Path, duck_pct: int, fade_sec: float):
+        self.path     = path
+        self.duck_pct = max(0, min(100, duck_pct))
+        self.fade_sec = max(0.0, fade_sec)
+        self._proc: subprocess.Popen | None = None
+        self._lock    = threading.Lock()
+        self._running = False
+        self._paused  = False
+
+    def start(self) -> None:
+        self._running = True
+        t = threading.Thread(target=self._loop, daemon=True, name="hint-music-loop")
+        t.start()
+        print(f"[MUSIC] started loop: {self.path}")
+
+    def _play_cmd(self) -> list[str]:
+        if self.path.suffix.lower() == ".mp3" and shutil.which("mpg123"):
+            return ["mpg123", "-q", str(self.path)]
+        return ["paplay", str(self.path)]
+
+    def _loop(self) -> None:
+        while self._running:
+            cmd = self._play_cmd()
+            p: subprocess.Popen | None = None
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                with self._lock:
+                    self._proc = p
+                p.wait()
+            except Exception as e:
+                print(f"[MUSIC] loop error: {e}")
+                time.sleep(1.0)
+            finally:
+                with self._lock:
+                    if self._proc is not None and p is not None and self._proc.pid == p.pid:
+                        self._proc = None
+            if self._running:
+                time.sleep(0.05)  # tiny gap between loop iterations
+
+    def _find_sink_input_id(self) -> str | None:
+        """Find the PulseAudio sink-input ID for the music process by PID."""
+        with self._lock:
+            p = self._proc
+        if p is None or p.poll() is not None:
+            return None
+        pid = p.pid
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sink-inputs"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+            current_id: str | None = None
+            for line in result.stdout.splitlines():
+                s = line.strip()
+                if s.startswith("Sink Input #"):
+                    current_id = s.split("#", 1)[1].strip()
+                elif "application.process.id" in s and f'"{pid}"' in s:
+                    return current_id
+        except Exception:
+            pass
+        return None
+
+    def _fade(self, sink_id: str, from_pct: int, to_pct: int) -> None:
+        steps = max(1, int(self.fade_sec * 20))  # ~20 steps/sec
+        step_delay = self.fade_sec / steps
+        for i in range(1, steps + 1):
+            vol = int(from_pct + (to_pct - from_pct) * i / steps)
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-input-volume", sink_id, f"{vol}%"],
+                    capture_output=True, timeout=1,
+                )
+            except Exception:
+                pass
+            time.sleep(step_delay)
+
+    def duck(self) -> None:
+        """Fade music stream volume down — music keeps playing quietly."""
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            self._fade(sink_id, 100, self.duck_pct)
+
+    def unduck(self) -> None:
+        """Fade music stream volume back to 100%."""
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            self._fade(sink_id, self.duck_pct, 100)
+
+    def pause(self) -> None:
+        """Instantly mute via pactl then freeze paplay.
+
+        Muting first silences PulseAudio's buffer immediately; SIGSTOP then
+        freezes paplay so the file position is preserved for resume.
+        """
+        if self._paused:
+            return
+        # Mute the stream instantly so the PA buffer goes silent right away.
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-input-mute", sink_id, "1"],
+                    capture_output=True, timeout=1,
+                )
+            except Exception:
+                pass
+        with self._lock:
+            p = self._proc
+        if p and p.poll() is None:
+            try:
+                p.send_signal(signal.SIGSTOP)
+                self._paused = True
+            except Exception:
+                pass
+
+    def resume(self) -> None:
+        """Unfreeze paplay then unmute the stream."""
+        if not self._paused:
+            return
+        with self._lock:
+            p = self._proc
+        if p and p.poll() is None:
+            try:
+                p.send_signal(signal.SIGCONT)
+                self._paused = False
+            except Exception:
+                pass
+        # Unmute after SIGCONT so audio is restored as soon as paplay resumes.
+        sink_id = self._find_sink_input_id()
+        if sink_id:
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-input-mute", sink_id, "0"],
+                    capture_output=True, timeout=1,
+                )
+            except Exception:
+                pass
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def restart(self) -> None:
+        """Restart the loop from the beginning.
+
+        Terminates the current paplay process; the loop thread will
+        immediately respawn it from the top of the file.
+        """
+        with self._lock:
+            p = self._proc
+        if p and p.poll() is None:
+            try:
+                if self._paused:
+                    p.send_signal(signal.SIGCONT)
+                    self._paused = False
+                p.terminate()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self._running = False
+        with self._lock:
+            p = self._proc
+        if p:
+            try:
+                if self._paused:
+                    p.send_signal(signal.SIGCONT)
+                p.terminate()
+            except Exception:
+                pass
+
+
+# Instantiate music loop player if configured (no-op when env var not set).
 def _aplay_cmd_for(path: Path) -> list[str]:
     """Return the *primary* player command for a file."""
 
@@ -255,6 +443,22 @@ def _player_cmd_candidates(path: Path) -> list[list[str]]:
         uniq.append(c)
 
     return uniq
+
+
+# Instantiate music loop player after audio helpers are defined.
+_music_player: MusicLoopPlayer | None = None
+if HINT_MUSIC_LOOP_PATH:
+    _loop_path = Path(HINT_MUSIC_LOOP_PATH)
+    if _loop_path.exists():
+        _music_player = MusicLoopPlayer(
+            _loop_path,
+            HINT_MUSIC_DUCK_VOLUME,
+            HINT_MUSIC_FADE_SEC,
+        )
+        _music_player.start()
+    else:
+        print(f"[MUSIC] loop file not found, music disabled: {_loop_path}")
+
 
 # --- Helper: sniff audio type by magic bytes
 def sniff_audio_type(path: Path) -> str:
@@ -861,6 +1065,10 @@ def main() -> None:
                 else:
                     raise RuntimeError(f"unknown_job_type:{jtype}")
 
+                # Duck background music while announcement plays.
+                if _music_player:
+                    _music_player.duck()
+
                 # Spawn player so we can cancel it mid-playback.
                 # Try a fallback chain (preferred ALSA device -> default -> bare -> paplay).
                 cmd_candidates = _player_cmd_candidates(path)
@@ -1034,6 +1242,9 @@ def main() -> None:
                 except Exception:
                     pass
             finally:
+                # Always restore music volume after playback (handles cancel/error too).
+                if _music_player:
+                    _music_player.unduck()
                 with q_lock:
                     current_job = None
                     current_proc = None
@@ -1254,10 +1465,68 @@ def main() -> None:
             elif cmd in {"beep", "speaker_test"}:
                 enqueue_job({"type": "beep", "command_id": str(cid)})
 
+            elif cmd == "set_music":
+                params = d.get("params") or {}
+                action = str(params.get("action") or "").strip().lower()
+                if _music_player is None:
+                    publish_ack(str(cid), "completed", {"music": "not_configured"})
+                elif action == "pause":
+                    _music_player.pause()
+                    publish_ack(str(cid), "completed", {"music": "paused"})
+                elif action == "resume":
+                    _music_player.resume()
+                    publish_ack(str(cid), "completed", {"music": "resumed"})
+                elif action == "toggle":
+                    if _music_player.is_paused:
+                        _music_player.resume()
+                        publish_ack(str(cid), "completed", {"music": "resumed"})
+                    else:
+                        _music_player.pause()
+                        publish_ack(str(cid), "completed", {"music": "paused"})
+                elif action == "restart":
+                    _music_player.restart()
+                    publish_ack(str(cid), "completed", {"music": "restarted"})
+                else:
+                    raise RuntimeError(f"unknown_music_action:{action}")
+
             elif cmd == "shutdown":
                 publish_ack(str(cid), "completed", {"action": "shutdown"})
                 time.sleep(0.5)
                 subprocess.Popen(["sudo", "shutdown", "now"])
+
+            elif cmd == "set_wifi":
+                params = d.get("params") or {}
+                ssid = str(params.get("ssid") or "").strip()
+                psk = str(params.get("psk") or "").strip()
+                if not ssid or not psk:
+                    raise RuntimeError("ssid_and_psk_required")
+
+                # ACK before switching — the wifi change will drop MQTT.
+                publish_ack(str(cid), "completed", {"action": "set_wifi", "ssid": ssid})
+                time.sleep(0.5)
+
+                # Build and activate new wifi profile (same as device_setup)
+                conn_name = "venue-" + "".join(
+                    c if (c.isalnum() or c in ("-", "_")) else "_" for c in ssid
+                )[:22]
+                try:
+                    subprocess.check_call(["sudo", "nmcli", "con", "delete", conn_name])
+                except Exception:
+                    pass
+                subprocess.check_call([
+                    "sudo", "nmcli", "con", "add",
+                    "type", "wifi", "ifname", "wlan0",
+                    "con-name", conn_name, "ssid", ssid,
+                ])
+                subprocess.check_call([
+                    "sudo", "nmcli", "con", "modify", conn_name,
+                    "wifi-sec.key-mgmt", "wpa-psk",
+                ])
+                subprocess.check_call([
+                    "sudo", "nmcli", "con", "modify", conn_name,
+                    "wifi-sec.psk", psk,
+                ])
+                subprocess.check_call(["sudo", "nmcli", "con", "up", conn_name])
 
             else:
                 # Back-compat: treat unknown command as play test

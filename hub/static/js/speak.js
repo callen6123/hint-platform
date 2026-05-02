@@ -764,6 +764,60 @@
     }
   });
 
+  // Music pause/resume toggle
+  let _musicPaused = false;
+  const musicToggleBtn = $("musicToggleBtn");
+  if (musicToggleBtn) {
+    musicToggleBtn.addEventListener('click', async () => {
+      const device_id = $("device")?.value || '';
+      if (!device_id) { log('Pick a device first.'); return; }
+      const action = _musicPaused ? 'resume' : 'pause';
+      try {
+        musicToggleBtn.disabled = true;
+        $("musicStatus").textContent = action === 'pause' ? 'Pausing…' : 'Resuming…';
+        const r = await api('/ui/device/music', 'POST', { device_id, action });
+        if (r?.ok) {
+          _musicPaused = !_musicPaused;
+          musicToggleBtn.innerHTML = _musicPaused ? '&#9654; Resume Music' : '&#9646;&#9646; Pause Music';
+          $("musicStatus").textContent = _musicPaused ? 'Paused' : 'Playing';
+        } else {
+          $("musicStatus").textContent = r?.error || 'Error';
+        }
+      } catch(e) {
+        $("musicStatus").textContent = 'Error';
+        log(`Music toggle error: ${e.message}`);
+      } finally {
+        musicToggleBtn.disabled = false;
+      }
+    });
+  }
+
+  // Music restart
+  const musicRestartBtn = $("musicRestartBtn");
+  if (musicRestartBtn) {
+    musicRestartBtn.addEventListener('click', async () => {
+      const device_id = $("device")?.value || '';
+      if (!device_id) { log('Pick a device first.'); return; }
+      try {
+        musicRestartBtn.disabled = true;
+        $("musicStatus").textContent = 'Restarting…';
+        const r = await api('/ui/device/music', 'POST', { device_id, action: 'restart' });
+        if (r?.ok) {
+          _musicPaused = false;
+          if (musicToggleBtn) musicToggleBtn.innerHTML = '&#9646;&#9646; Pause Music';
+          $("musicStatus").textContent = 'Playing';
+        } else {
+          $("musicStatus").textContent = r?.error || 'Error';
+        }
+      } catch(e) {
+        $("musicStatus").textContent = 'Error';
+        log(`Music restart error: ${e.message}`);
+      } finally {
+        musicRestartBtn.disabled = false;
+      }
+    });
+  }
+
   const savePhraseBtn = $("savePhraseBtn");
   if (savePhraseBtn) savePhraseBtn.addEventListener('click', async () => {
     const label = ($("phraseLabel")?.value || '').trim();
@@ -943,5 +997,11 @@
     }
   });
 
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (logoutBtn) logoutBtn.addEventListener('click', async () => {
+    try { logoutBtn.disabled = true; await fetch('/logout', { method: 'POST' }); }
+    catch(e) {}
+    finally { window.location.href = '/login'; }
+  });
   refreshAll(false).catch(e => log(`Init failed: ${e.message}`));
 })();

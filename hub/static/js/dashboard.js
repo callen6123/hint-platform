@@ -3,6 +3,13 @@
   const logEl = $("log");
   const statusTbody = $("statusTbody");
 
+  // Role-based visibility
+  const _uiRole = (window.HUB_UI_ROLE || '').toLowerCase();
+  const _isAdmin = _uiRole === 'admin';
+  if (!_isAdmin) {
+    document.querySelectorAll('.admin-only').forEach(el => el.style.display = 'none');
+  }
+
   // Cached device list from /ui/status for UI controls
   let _devicesCache = [];
 
@@ -398,6 +405,32 @@ async function loadAudioStatus(){
     const hubUpdText = (hubUpdAvail === true) ? 'Update Available' : (hubUpdAvail === false ? 'Up To Date' : '—');
     const hubUpdCls = (hubUpdAvail === true) ? 'status-offline' : (hubUpdAvail === false ? 'status-online' : 'muted');
 
+    // Non-admin: simplified table with only Device, Status, Speak, Test
+    if (!_isAdmin) {
+      for (const d of devices){
+        const did = String((d && d.device_id) || '');
+        const name = String((d && (d.friendly_name || d.device_id)) || 'Device');
+        const st = normStatus(d);
+
+        rows.push(
+          `<tr>`+
+            `<td><strong>${esc(name)}</strong></td>`+
+            `<td><span class="${statusClass(st)}">${esc(st)}</span></td>`+
+            `<td>`+
+              (did ? `<a class="btn" href="/speak/${esc(did)}" target="_blank" rel="noopener noreferrer">Speak</a>` : '')+
+            `</td>`+
+            `<td>`+
+              (did ? `<button data-action="beep" data-device="${esc(did)}">Beep</button>` : '')+
+            `</td>`+
+          `</tr>`
+        );
+      }
+
+      statusTbody.innerHTML = rows.join('') || '<tr><td colspan="4" class="muted">No devices.</td></tr>';
+      return;
+    }
+
+    // Admin: full table
     rows.push(
       `<tr>`+
         `<td><strong>Hub</strong></td>`+
@@ -1111,6 +1144,58 @@ async function loadAudioStatus(){
       // ignore
     } finally {
       window.location.href = '/login';
+    }
+  });
+
+  // WiFi update handler
+  const wifiSubmitBtn = $("wifiSubmitBtn");
+  const wifiSsid = $("wifiSsid");
+  const wifiPsk = $("wifiPsk");
+  const wifiStatus = $("wifiStatus");
+
+  if (wifiSubmitBtn) wifiSubmitBtn.addEventListener('click', async () => {
+    const ssid = (wifiSsid ? wifiSsid.value : '').trim();
+    const psk = (wifiPsk ? wifiPsk.value : '').trim();
+
+    if (!ssid || !psk) {
+      if (wifiStatus) wifiStatus.textContent = 'SSID and Password are required.';
+      return;
+    }
+
+    if (!confirm('Are you sure you want to change the WiFi?')) return;
+
+    try {
+      wifiSubmitBtn.disabled = true;
+      if (wifiStatus) {
+        wifiStatus.textContent = 'Sending WiFi credentials to devices and updating hub... This may take a moment.';
+        wifiStatus.style.color = '';
+      }
+
+      const res = await api('/ui/admin/wifi', 'POST', { ssid, psk });
+
+      if (res.ok) {
+        if (wifiStatus) {
+          wifiStatus.style.color = '#4caf50';
+          wifiStatus.textContent =
+            `WiFi updated successfully. ${res.online_device_count || 0} device(s) notified. ` +
+            'The hub is now switching networks. You may need to reconnect to the new WiFi and reload this page.';
+        }
+      } else {
+        if (wifiStatus) {
+          wifiStatus.style.color = '#e05555';
+          wifiStatus.textContent = `WiFi update failed: ${res.hub_result || 'unknown error'}`;
+        }
+      }
+    } catch (e) {
+      // The hub switching wifi will likely drop the connection, which is expected
+      if (wifiStatus) {
+        wifiStatus.style.color = '#4caf50';
+        wifiStatus.textContent =
+          'WiFi update in progress. The hub is switching networks. ' +
+          'Reconnect to the new WiFi network and reload this page.';
+      }
+    } finally {
+      wifiSubmitBtn.disabled = false;
     }
   });
 
